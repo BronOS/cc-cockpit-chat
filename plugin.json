@@ -1,0 +1,148 @@
+{
+  "id": "bronos.chat",
+  "name": "Google Chat",
+  "version": "0.1.0",
+  "api": 1,
+  "main": "dist/host.js",
+  "description": "Your Google Chat in lanes (Mentions, Direct messages, Spaces, Alerts, Recent), sorted by Jev triage, a conversation opened as a clean page to discuss with Claude, Mark read / Mark unread. It changes nothing in Google Chat but your read state.",
+  "author": "Oleg Bronzov",
+  "license": "MIT",
+  "contributes": {
+    "panels": [
+      {
+        "id": "main",
+        "title": "Google Chat",
+        "icon": "icons/chat.svg",
+        "entry": "panels/main.html",
+        "defaultZone": "right"
+      }
+    ],
+    "settings": {
+      "project": {
+        "type": "object",
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "title": "OAuth client ID",
+            "description": "The client ID of your own Google Cloud OAuth client (a Desktop app client), ending in .apps.googleusercontent.com. Or leave it empty and paste the client file in the Google Chat panel: a pasted client wins. Changing it signs you out.",
+            "maxLength": 300,
+            "default": ""
+          },
+          "clientSecret": {
+            "type": "string",
+            "format": "secret",
+            "title": "OAuth client secret",
+            "description": "The client secret of the same Desktop app client (Google Cloud console > Google Auth Platform > Clients)."
+          },
+          "lanes": {
+            "type": "object",
+            "title": "Lanes",
+            "description": "Which lanes to show. A hidden lane is never sent to triage. Alerts shows only with alert bots.",
+            "additionalProperties": false,
+            "properties": {
+              "mentions": { "type": "boolean", "title": "Mentions (unread, @you by name)", "default": true },
+              "direct": { "type": "boolean", "title": "Direct messages (unread DMs and group chats)", "default": true },
+              "spaces": { "type": "boolean", "title": "Spaces (unread space conversations, @all included)", "default": true },
+              "alerts": { "type": "boolean", "title": "Alerts (unread messages of the alert bots)", "default": true },
+              "recent": { "type": "boolean", "title": "Recent (read conversations of the last days)", "default": true }
+            },
+            "default": { "mentions": true, "direct": true, "spaces": true, "alerts": true, "recent": true }
+          },
+          "alertBots": {
+            "type": "array",
+            "title": "Alert bots",
+            "description": "Display names of bots (as Chat shows them, e.g. Grafana) whose messages go to the Alerts lane, grouped by alert name. Empty: no Alerts lane.",
+            "maxItems": 50,
+            "items": { "type": "string", "title": "Bot name", "maxLength": 100 },
+            "default": []
+          },
+          "rowsPerLane": {
+            "type": "integer",
+            "title": "Rows per lane",
+            "description": "How many conversations a lane shows; the rest are behind Show all at the bottom of the lane.",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 10
+          },
+          "days": {
+            "type": "integer",
+            "title": "Days back",
+            "description": "Spaces without a message in this many days are not read, and the mentions search looks this far back.",
+            "minimum": 1,
+            "maximum": 90,
+            "default": 14
+          },
+          "messagesPerSpace": {
+            "type": "integer",
+            "title": "Messages read per space",
+            "description": "The newest messages read from a space that changed (more unread than this shows as the newest ones).",
+            "minimum": 5,
+            "maximum": 100,
+            "default": 12
+          },
+          "recentDays": {
+            "type": "integer",
+            "title": "Recent: days back",
+            "description": "How far back the Recent lane looks for read conversations.",
+            "minimum": 1,
+            "maximum": 14,
+            "default": 2
+          },
+          "maxRecent": {
+            "type": "integer",
+            "title": "Recent: conversations",
+            "description": "The newest read conversations the Recent lane shows.",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 10
+          },
+          "recentPerSpace": {
+            "type": "integer",
+            "title": "Recent: per space",
+            "description": "At most this many read conversations of one space in the Recent lane.",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 3
+          },
+          "pollMinutes": {
+            "type": "integer",
+            "title": "Poll every (minutes)",
+            "description": "Only while this project's window is open. A poll lists your spaces and reads only those with new messages.",
+            "minimum": 1,
+            "maximum": 1440,
+            "default": 2
+          },
+          "markReadOnOpen": {
+            "type": "boolean",
+            "title": "Opening an unread row marks it read",
+            "description": "When the conversation opens, its space (or thread) is marked read in Google Chat, as Chat does when you open it. Off: only Mark read does.",
+            "default": true
+          },
+          "triageText": {
+            "type": "string",
+            "title": "What triage reads",
+            "description": "Full: who wrote, where, and the text of the conversation go to Jev (through Jev triage). Summary: only who, where and whom it addresses, for employers who object to chat text leaving.",
+            "oneOf": [
+              { "const": "full", "title": "Full (who, where and the text)" },
+              { "const": "summary", "title": "Summary only (who, where and whom)" }
+            ],
+            "default": "full"
+          }
+        }
+      }
+    },
+    "cli": [
+      {
+        "name": "chat",
+        "summary": "Google Chat: status, refresh, list the lanes, show a conversation, mark read or unread, sign in or out, set the OAuth client",
+        "usage": "chat status | refresh | list [lane] | show <id> | read <id> | unread <id> | login | logout | client <file.json> | help"
+      }
+    ]
+  },
+  "services": {
+    "uses": {
+      "triage": 1,
+      "reviewer": 1
+    }
+  }
+}
