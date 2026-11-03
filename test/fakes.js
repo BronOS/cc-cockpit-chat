@@ -439,11 +439,13 @@ function fakeCtx(opts = {}) {
         })
       },
       available: (name) => Boolean(services[name]),
-      provide() {},
-      emit() {},
+      provide: (name, impl) => void (ctx.provided[name] = impl),
+      emit: (name, event, data) => void ctx.emitted.push({ name, event, data }),
       caller: () => undefined,
     },
     handles: {},
+    provided: {}, // service name -> the impl the plugin provided
+    emitted: [], // { name, event, data } of every ctx.services.emit
     lastState() {
       return [...ctx.posts].reverse().find((m) => m.type === 'state')
     },

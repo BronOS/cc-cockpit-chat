@@ -379,6 +379,9 @@ function buildView(o) {
       verdict: verdicts[c.id] || null,
       title,
       sub,
+      // For the inbox-feed service (lib/feed.js): the message text start, and the space or person.
+      preview,
+      where: c.kind === 'dm' ? 'Direct message' : spaceLabel(sp, c, names, me),
       from,
       count: c.new.length,
       target: readTarget(c),

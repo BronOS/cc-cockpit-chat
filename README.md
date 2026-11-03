@@ -97,6 +97,16 @@ app at Google: <https://myaccount.google.com/connections>. Uninstalling the plug
 keychain entries (the sign-in) on purpose; the pasted client file is kept with the project's plugin
 storage, so after a reinstall you only sign in again.
 
+## Inbox
+
+From 0.2.0 the plugin provides the `inbox-feed` service (v1) to the Inbox plugin, which lists what
+needs you across Chat, mail and issues. The feed is the Mentions and Direct messages rows of this
+panel, best first by the same triage (urgent, action, fyi; noise only when nothing else is there),
+read from the plugin's cache: Inbox asking never calls Google. An item's `rev` is its newest message,
+so Inbox can hold a done item back until a new message arrives. Opening an item does what a row click
+does, and Mark read is the panel's own Mark read. Without a triage verdict a mention counts as action
+and a direct message as fyi. Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
+
 ## Read state: what Mark read and Mark unread change
 
 Google Chat keeps **one read time per space** (and one per followed thread, which only Chat itself
