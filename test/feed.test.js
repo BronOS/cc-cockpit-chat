@@ -152,7 +152,7 @@ test('recentItems: newest first (then id), no level order, noise kept, same Feed
 
 function boot(opts = {}) {
   const reg = tokens()
-  const google = fakeGoogle({ tokens: reg })
+  const google = fakeGoogle({ tokens: reg, ...(opts.google || {}) })
   const ctx = fakeCtx({ project: { alertBots: ['Grafana'], ...(opts.project || {}) }, oauth: fakeOAuth(reg), triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer })
   const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: google.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, cliWaitMs: 3000 })
   return { ctx, h, google }
@@ -183,9 +183,9 @@ async function signedIn(opts) {
 test('provides inbox-feed with the contract methods; describe and features', async () => {
   const { ctx, h } = boot()
   const svc = ctx.provided['inbox-feed']
-  assert.deepEqual(Object.keys(svc).sort(), ['describe', 'features', 'items', 'markRead', 'open', 'recent'])
+  assert.deepEqual(Object.keys(svc).sort(), ['describe', 'features', 'items', 'markRead', 'markUnread', 'open', 'recent'])
   assert.deepEqual(await svc.describe(), { label: 'Chat', badge: 'CHAT', color: 'green', kind: 'chat' })
-  assert.deepEqual(await svc.features(), ['markRead', 'recent'])
+  assert.deepEqual(await svc.features(), ['markRead', 'recent', 'markUnread'])
   await h.stop()
 })
 
@@ -336,6 +336,48 @@ test('markRead on a read (Recent) row is a harmless no-op for the feed', async (
   const id = (await svc.recent({})).items[0].id
   await svc.markRead(id).catch(() => {}) // may refuse a row with no mark target; must not throw anything but chat: errors
   assert.equal((await svc.recent({ limit: 50 })).items.every((i) => i.unread === false), true)
+  await b.h.stop()
+})
+
+test('markUnread: a read (Recent) row goes through the panel write, moves to items, changed is emitted', async () => {
+  const b = await signedIn()
+  const svc = b.ctx.provided['inbox-feed']
+  const id = (await svc.recent({ limit: 50 })).items.find((i) => !i.id.includes('/threads/')).id
+  const n = () => b.ctx.emitted.filter((e) => e.name === 'inbox-feed' && e.event === 'changed').length
+  const before = n()
+  const writes = b.google.writes.length
+  await svc.markUnread(id)
+  assert.equal(b.google.writes.length, writes + 1, 'one read-state write')
+  assert.ok(n() > before)
+  assert.ok((await svc.items({ limit: 50 })).items.some((i) => i.id === id) || b.h.S.marks[id].want === 'unread')
+  assert.ok(!(await svc.recent({ limit: 50 })).items.some((i) => i.id === id))
+  await b.h.stop()
+})
+
+test('markUnread: unknown ids and alert rows are refused as chat: errors, nothing written', async () => {
+  const b = await signedIn()
+  const svc = b.ctx.provided['inbox-feed']
+  for (const bad of [undefined, 7, '', 'nope', 'alert:Disk', 'spaces/ZZZ']) await assert.rejects(() => svc.markUnread(bad), /^Error: chat: /, String(bad))
+  assert.deepEqual(b.google.writes, [])
+  await b.h.stop()
+})
+
+test('markUnread: a thread row rejects with the panel\'s own message (Chat cannot change a thread\'s read state)', async () => {
+  const b = await signedIn()
+  const svc = b.ctx.provided['inbox-feed']
+  const t = (await svc.recent({ limit: 50 })).items.find((i) => i.id.includes('/threads/'))
+  if (t) await assert.rejects(() => svc.markUnread(t.id), /^Error: chat: .*thread/)
+  assert.deepEqual(b.google.writes, [])
+  await b.h.stop()
+})
+
+test('markUnread: a failing write rejects as chat: and the row stays read', async () => {
+  const fail = new Proxy({}, { get: (_, k) => (typeof k === 'string' && k.startsWith('patch:') ? 500 : undefined) })
+  const b = await signedIn({ google: { fail } })
+  const svc = b.ctx.provided['inbox-feed']
+  const id = (await svc.recent({ limit: 50 })).items.find((i) => !i.id.includes('/threads/')).id
+  await assert.rejects(() => svc.markUnread(id), /^Error: chat: .*Could not mark/)
+  assert.ok((await svc.recent({ limit: 50 })).items.some((i) => i.id === id))
   await b.h.stop()
 })
 

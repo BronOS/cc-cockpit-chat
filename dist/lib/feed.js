@@ -31,7 +31,7 @@ const ID_MAX = 300 // a space or thread resource name is far shorter; bounds wha
 const CAPS = { title: 300, from: 120, where: 120 }
 
 const DESCRIBE = Object.freeze({ label: 'Chat', badge: 'CHAT', color: 'green', kind: 'chat' })
-const FEATURES = Object.freeze(['markRead', 'recent'])
+const FEATURES = Object.freeze(['markRead', 'recent', 'markUnread'])
 
 function clampLimit(v) {
   if (v === undefined || v === null) return LIMIT.def

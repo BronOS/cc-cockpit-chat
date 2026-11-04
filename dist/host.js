@@ -1111,6 +1111,12 @@ function start(ctx, io = {}) {
       const r = await markRow(feedRow(id), 'read', { quiet: true })
       if (r.error) throw new Error(`chat: ${cut(oneLine(r.error), 300)}`)
     },
+    // Optional (features() says so): the panel's own Mark unread (markRow 'unread'); an alert row is refused as there.
+    async markUnread(id) {
+      await ready
+      const r = await markRow(feedRow(id), 'unread', { quiet: true })
+      if (r.error) throw new Error(`chat: ${cut(oneLine(r.error), 300)}`)
+    },
   }
   // Providing needs nothing newer than the app's services; Inbox reading it needs 0.9.7 (useAll).
   if (ctx.services && typeof ctx.services.provide === 'function') ctx.services.provide('inbox-feed', feedService)

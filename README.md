@@ -107,7 +107,8 @@ so Inbox can hold a done item back until a new message arrives. Opening an item 
 does, and Mark read is the panel's own Mark read. Without a triage verdict a mention counts as action
 and a direct message as fyi. The optional `recent` method (announced through `features()`) lists the read
 conversations of the Recent lane, newest first, from the same cache, so Inbox can reopen one; opening
-it marks nothing read. Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
+it marks nothing read. The optional `markUnread` method is the panel's own Mark unread, so Inbox can
+offer it on those read rows. Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
 
 ## Read state: what Mark read and Mark unread change
 
