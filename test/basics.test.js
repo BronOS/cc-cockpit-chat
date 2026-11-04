@@ -102,7 +102,7 @@ test('settings: defaults, clamps, alert bots one line each, mark read on open on
   assert.equal(cfg.days, 14)
   assert.equal(cfg.recentDays, 2)
   assert.equal(cfg.pollMinutes, 2)
-  assert.equal(cfg.markReadOnOpen, true)
+  assert.equal(cfg.markReadOnOpen, false)
   assert.equal(cfg.triageText, 'full')
   assert.equal(alertsOn(cfg), false, 'no alert bots: no Alerts lane')
   const b = readSettings({ lanes: { spaces: false }, alertBots: ['Grafana', ' Grafana ', 'x'.repeat(150), 3], rowsPerLane: 9999, recentDays: 0, markReadOnOpen: false, triageText: 'summary', clientId: 'nope' })

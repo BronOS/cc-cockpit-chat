@@ -36,7 +36,7 @@ told from 0.9.2 by the API: the README says 0.9.2).
 6. **Mark read**: yes, writes now. The read-state scope `chat.users.readstate` (it reads too, so
    it replaces `.readonly`), a Chat app configuration in the Cloud project (Google takes no write
    without one), hover buttons Mark read / Mark unread, and mark read on open (project setting
-   `markReadOnOpen`, default true). Optimistic, with a rollback and a notice when Chat refuses.
+   `markReadOnOpen`, default false since 0.2.0). Optimistic, with a rollback and a notice when Chat refuses.
    Writes only ever touch the read state.
 
 ## What Google's docs say (researched 2026-11-03)
@@ -283,7 +283,7 @@ space's read time, as the old connector did (its `mark_target`):
   replaces the guess with Chat's state; on failure the row is put back and a notice says why
   (`Could not mark … read in Chat: <reason>. It is shown as before.`). A mark the poll has not
   confirmed yet survives a poll that started before it finished.
-- **Mark read on open** (`markReadOnOpen`, default true): opening an unread row (panel click,
+- **Mark read on open** (`markReadOnOpen`, default false since 0.2.0: the user does not want a look to mark it read): opening an unread row (panel click,
   Enter) marks it read the same way once the view is up. `ccc chat show` never marks.
 - No other write exists: no message is sent, edited, deleted or reacted to (`lib/client.js` has
   one write method, and a source test checks it).
@@ -371,7 +371,7 @@ counts per lane, triage on/off, errors. `show` takes `spaces/S`, `spaces/S/threa
 `clientId`, `clientSecret`, `lanes` (`mentions`, `direct`, `spaces`, `alerts`, `recent`),
 `rowsPerLane` 10, `days` 14 (1..90), `messagesPerSpace` 12 (5..100), `recentDays` 2 (1..14),
 `maxRecent` 10, `recentPerSpace` 3, `alertBots` [], `pollMinutes` 2, `triageText` full|summary,
-`markReadOnOpen` true. No regexes.
+`markReadOnOpen` false. No regexes.
 
 ## Left out of v1
 

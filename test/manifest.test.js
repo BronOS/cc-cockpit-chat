@@ -74,7 +74,7 @@ test('the schema and settings.js agree: every property is read, every default th
     }
   }
   assert.equal(props.markReadOnOpen.type, 'boolean')
-  assert.equal(props.markReadOnOpen.default, true)
+  assert.equal(props.markReadOnOpen.default, false)
   assert.equal(props.alertBots.items.maxLength, 100)
 })
 

@@ -115,8 +115,8 @@
           "markReadOnOpen": {
             "type": "boolean",
             "title": "Opening an unread row marks it read",
-            "description": "When the conversation opens, its space (or thread) is marked read in Google Chat, as Chat does when you open it. Off: only Mark read does.",
-            "default": true
+            "description": "When the conversation opens, its space (or thread) is marked read in Google Chat, as Chat does when you open it. Off (the default): opening only shows it, and only Mark read marks it.",
+            "default": false
           },
           "triageText": {
             "type": "string",

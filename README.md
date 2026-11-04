@@ -3,7 +3,7 @@
 `bronos.chat` shows your Google Chat in a cc-cockpit panel, in lanes, sorted by
 [Jev triage](https://github.com/BronOS/cc-cockpit-jev-triage), and hands a conversation to Claude to
 discuss. **It changes nothing in Google Chat but your read state**: Mark read, Mark unread, and (with
-`markReadOnOpen`, on by default) opening an unread row. It never sends, edits, deletes or reacts to a
+`markReadOnOpen`, off by default) opening an unread row. It never sends, edits, deletes or reacts to a
 message. There is no "open in Chat" link anywhere.
 
 - **Lanes**: Mentions (unread, @you by name, outside DMs), Direct messages (unread DMs and group
@@ -123,7 +123,7 @@ sets). A mark moves the space's read time, so it has side effects inside the sam
 - The row changes at once; the call runs; the next poll replaces the guess with what Chat says. When
   the call fails, the row is put back and a notice says why ("Could not mark ... It is shown as
   before.").
-- **Opening** an unread row marks it read once the view is up (`markReadOnOpen`, default on).
+- **Opening** an unread row marks it read once the view is up when `markReadOnOpen` is on (default off: opening only shows it).
   Discuss, New session and `ccc chat show` never mark.
 
 ## Settings (per project)
@@ -144,12 +144,12 @@ Settings > This project > Google Chat, or from a tab: `ccc plugin config bronos.
 | `maxRecent` | 10 | the read conversations Recent shows |
 | `recentPerSpace` | 3 | at most this many of one space in Recent |
 | `pollMinutes` | 2 | only while the project's window is open |
-| `markReadOnOpen` | `true` | opening an unread row marks it read |
+| `markReadOnOpen` | `false` | opening an unread row marks it read |
 | `triageText` | `full` | `full` or `summary` (see Privacy) |
 
 ```sh
 ccc plugin config bronos.chat 'alertBots=["Grafana"]' pollMinutes=5
-ccc plugin config bronos.chat markReadOnOpen=false
+ccc plugin config bronos.chat markReadOnOpen=true
 ```
 
 ## How a poll works

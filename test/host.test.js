@@ -289,7 +289,7 @@ test('ccc chat read on an alert row: every space of the group moved to its newes
 
 test('open: the reviewer gets clean HTML with the picture, the aside, no url; mark read on open follows', async () => {
   const reviewer = fakeReviewer()
-  const { ctx, h, google } = await signedIn({ reviewer, sessions: [tab('t1', 'waiting', { active: true })] })
+  const { ctx, h, google } = await signedIn({ reviewer, sessions: [tab('t1', 'waiting', { active: true })], project: { markReadOnOpen: true } })
   await ctx.sendPanel({ type: 'open', id: S.dm })
   await settle({ h })
   const a = reviewer.calls[0]
@@ -452,7 +452,7 @@ test('the CLI: status, refresh, list, show; show marks nothing', async () => {
   assert.match(st.stdout, /user id +users\/1001\n/)
   assert.match(st.stdout, /scopes +all granted/)
   assert.match(st.stdout, /lanes +Mentions 1 · Direct messages 1 · Spaces 1 · Alerts 1 · Recent 2/)
-  assert.match(st.stdout, /marks +Mark read \/ unread, and opening an unread row marks it read/)
+  assert.match(st.stdout, /marks +Mark read \/ unread only \(markReadOnOpen is off\)/)
   const r = await ctx.runCli(['refresh'])
   assert.equal(r.code, 0, r.stderr)
   assert.match(r.stdout, /Mentions 1/)
@@ -498,7 +498,7 @@ test('requests go only to Chat, People and the token info; the token never in a 
 
 test('opening a thread with markReadOnOpen: its space moves to the thread\'s newest message', async () => {
   const reviewer = fakeReviewer()
-  const { ctx, h, google } = await signedIn({ reviewer })
+  const { ctx, h, google } = await signedIn({ reviewer, project: { markReadOnOpen: true } })
   await ctx.sendPanel({ type: 'open', id: T1 })
   await settle({ h })
   assert.match(reviewer.calls[0].html, /<strong>@you<\/strong>/)

@@ -60,7 +60,8 @@ function readSettings(p) {
     recentPerSpace: int(s.recentPerSpace, 3, 1, 20),
     pollMinutes: int(s.pollMinutes, 2, 1, 1440),
     triageText: s.triageText === 'summary' ? 'summary' : 'full',
-    markReadOnOpen: s.markReadOnOpen !== false,
+    // Off by default (0.2.0): opening a message to look at it must not mark it read; Mark read does.
+    markReadOnOpen: s.markReadOnOpen === true,
   }
   return { cfg, problems }
 }
