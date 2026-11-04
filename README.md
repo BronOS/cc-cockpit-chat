@@ -108,7 +108,7 @@ does, and Mark read is the panel's own Mark read. Without a triage verdict a men
 and a direct message as fyi. The optional `recent` method (announced through `features()`) lists the read
 conversations of the Recent lane, newest first, from the same cache, so Inbox can reopen one; opening
 it marks nothing read. The optional `markUnread` method is the panel's own Mark unread, so Inbox can
-offer it on those read rows. Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
+offer it on those read rows; a thread, which Chat's API cannot mark unread, says `canUnread: false`. Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
 
 ## Read state: what Mark read and Mark unread change
 

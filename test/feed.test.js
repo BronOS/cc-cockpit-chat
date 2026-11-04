@@ -28,6 +28,7 @@ function vrow(id, o = {}) {
     where: o.where || 'Direct message',
     from: o.from || 'Ann Example',
     mentioned: o.mentioned || null,
+    target: o.target === undefined ? { [id]: '2026-11-03T10:00:00Z' } : o.target,
     conv: { kind, latest: { id: `${id}/messages/${o.latest || 'M1'}`, text: o.text || '' }, context: [], new: [] },
   }
 }
@@ -69,6 +70,11 @@ test('a Jira key in the conversation is passed through, none otherwise', () => {
   r.conv.latest.text = 'Please look at ABC-123 today'
   assert.equal(feed.feedItem(r).jiraKey, 'ABC-123')
   assert.equal('jiraKey' in feed.feedItem(vrow('spaces/B')), false)
+})
+
+test('canUnread: false only on a row with no mark target (a thread); absent otherwise', () => {
+  assert.equal('canUnread' in feed.feedItem(vrow('spaces/A')), false)
+  assert.equal(feed.feedItem(vrow('spaces/A/threads/T', { target: null, unread: false })).canUnread, false)
 })
 
 test('order: level, then the newest, then the id; noise only when nothing else', () => {

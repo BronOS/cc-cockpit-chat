@@ -82,6 +82,10 @@ function feedItem(row) {
   }
   const key = jiraKey(c)
   if (key) item.jiraKey = key
+  // A row with no mark target (a thread: its replies are judged by the thread's own read time, which
+  // only Google Chat sets) cannot be marked unread; say so, so a consumer hides the button instead of
+  // offering one that markUnread refuses (readstate.js NO_TARGET_TEXT). Absent means it can.
+  if (!row.target) item.canUnread = false
   return item
 }
 
