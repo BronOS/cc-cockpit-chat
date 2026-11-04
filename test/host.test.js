@@ -306,6 +306,41 @@ test('open: the reviewer gets clean HTML with the picture, the aside, no url; ma
   await h.stop()
 })
 
+// Real-work feedback 8: the overlay came only after the conversation was read.
+test('open with a reviewer that has prepare: the overlay is up before anything is read, then filled', async () => {
+  const order = []
+  const reviewer = fakeReviewer()
+  reviewer.prepare = async (spec) => (order.push(['prepare', spec, reads()]), { opened: true })
+  reviewer.cancel = async (spec) => (order.push(['cancel', spec.key]), { closed: false })
+  const annotate = reviewer.annotate
+  reviewer.annotate = async (a) => (order.push(['annotate', a.key]), annotate(a))
+  const { ctx, h, google } = await signedIn({ reviewer, sessions: [tab('t1', 'waiting', { active: true })] })
+  const reads = () => google.calls.filter((c) => /messages|media/.test(c.path)).length
+  const before = reads()
+  await ctx.sendPanel({ type: 'open', id: S.dm })
+  await settle({ h })
+  assert.deepEqual(order[0], ['prepare', { key: `chat:${S.dm}`, title: 'Ann Example' }, before])
+  assert.ok(reads() > before, 'the open read the conversation, after prepare')
+  assert.deepEqual(order.slice(1), [['annotate', `chat:${S.dm}`], ['cancel', `chat:${S.dm}`]])
+  await h.stop()
+})
+
+test('open with prepare: an open that fails cancels the loading overlay', async () => {
+  const calls = []
+  const reviewer = {
+    prepare: async (spec) => (calls.push(['prepare', spec.key]), { opened: true }),
+    cancel: async (spec) => (calls.push(['cancel', spec.key]), { closed: true }),
+    annotate: async () => {
+      throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+    },
+  }
+  const { ctx, h } = await signedIn({ reviewer, sessions: [tab('t1', 'waiting', { active: true })] })
+  await ctx.sendPanel({ type: 'open', id: S.dm })
+  await settle({ h })
+  assert.deepEqual(calls, [['prepare', `chat:${S.dm}`], ['cancel', `chat:${S.dm}`]])
+  await h.stop()
+})
+
 test('markReadOnOpen off: opening marks nothing', async () => {
   const reviewer = fakeReviewer()
   const { ctx, h, google } = await signedIn({ reviewer, project: { alertBots: ['Grafana'], markReadOnOpen: false } })
@@ -354,6 +389,7 @@ test('Discuss: the conversation as text to the active waiting tab; two candidate
   assert.deepEqual(one.google.writes, [], 'Discuss marks nothing')
   await one.ctx.sendPanel({ type: 'newSession', id: S.dm })
   assert.match(one.ctx.opened[0].prompt, /^About the Google Chat conversation "Ann Example"/)
+  assert.equal(one.ctx.opened[0].focus, true, 'the new tab is shown')
   await one.h.stop()
   const two = await signedIn({ sessions: [tab('t1', 'waiting'), tab('t2', 'waiting')] })
   await two.ctx.sendPanel({ type: 'discuss', id: S.dm })

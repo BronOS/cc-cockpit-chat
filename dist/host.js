@@ -53,6 +53,8 @@ const THREAD_PAGE = 100 // the view: a thread, all of it (its newest 100)
 const CHAT_PAGE = 50 // the view: a DM, group chat or flat space, its newest 50
 // The reader page gets the html in parts: a page message is at most 1,040,384 chars of JSON.
 const PAGE_HTML_PART = 400000
+// How long the reviewer's prepare and cancel may take: host-local calls, far under this.
+const REVIEWER_WAIT_MS = 2000
 // Consumer Google accounts: Chat's API is for Workspace only (design "Workspace only").
 const PERSONAL_DOMAINS = new Set(['gmail.com', 'googlemail.com'])
 
@@ -666,8 +668,62 @@ function start(ctx, io = {}) {
    *   annotate({ html, assets, aside }) -> rejected (not "no method") -> annotate({ text })
    *   -> "no method annotate" or no reviewer -> panels/thread.html with the same HTML.
    * No `url` goes to annotate: there is no "open in Chat" (design, answer 2).
+   * The reviewer's overlay is up before the conversation is read (its prepare, where it has one):
+   * reading the messages, the names and the pictures takes seconds, with nothing on screen meanwhile
+   * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
+   * read, our own reader page) closes it in the finally.
    */
   async function openConversation(id) {
+    const pre = await prepareView(id)
+    try {
+      await showConversation(id, pre)
+    } finally {
+      if (pre) await cancelView(pre)
+    }
+  }
+
+  /** `p`, or a rejection after `ms`: a service call has no timeout of its own. */
+  function within(p, ms) {
+    let timer
+    return Promise.race([p, new Promise((_, rej) => (timer = setTimeout(() => rej(new Error('the reviewer did not answer in time')), ms)))]).finally(() => clearTimeout(timer))
+  }
+
+  /**
+   * The reviewer key and title of a row before it is read, the ones loadConversation and the annotate
+   * give it (`chat:<id>`, `chat:alert:<hash>`), or null.
+   */
+  function viewKeyOf(id) {
+    const which = rowId(id)
+    if (!which) return null
+    const row = rowOf(id)
+    if (!which.alert) return { key: `chat:${id}`, title: (row && row.title) || '' }
+    if (!row || row.kind !== 'alert') return null
+    return { key: `chat:alert:${sha(row.group.name, 16)}`, title: groupTitle(row.group) }
+  }
+
+  /**
+   * Opens the reviewer's overlay of a row now, with its loader: `{ key }` when it did, else null (no
+   * reviewer with annotate, or one without prepare, which rejects with "has no method": the overlay
+   * then comes with the annotate, as before).
+   */
+  async function prepareView(id) {
+    if (!annotateOn()) return null
+    const v = viewKeyOf(id)
+    if (!v) return null
+    try {
+      await within(reviewer.prepare({ key: v.key, title: cut(oneLine(v.title), 200) || '(no text)' }), REVIEWER_WAIT_MS)
+      return { key: v.key }
+    } catch {
+      return null
+    }
+  }
+
+  /** Closes a prepared overlay no annotate filled; a no-op once one did. */
+  async function cancelView(pre) {
+    await within(reviewer.cancel({ key: pre.key }), REVIEWER_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
+  }
+
+  async function showConversation(id, pre) {
     const t = await loadConversation(id)
     if (annotateOn()) {
       const pick = pickTab(await ctx.sessions.list().catch(() => []))
@@ -702,6 +758,8 @@ function start(ctx, io = {}) {
         }
       }
     }
+    // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
+    if (pre) await cancelView(pre)
     await plainReader(id, t, await conversationView(t, false))
   }
 
@@ -769,7 +827,8 @@ function start(ctx, io = {}) {
 
   async function newSession(id) {
     const prompt = await conversationPrompt(id)
-    await ctx.sessions.open({ prompt })
+    // The person clicked New session: the window shows the tab (an older app ignores `focus`).
+    await ctx.sessions.open({ prompt, focus: true })
     setNotice(`Opened a new Claude tab about ${labelOf(id)}.`)
   }
 
