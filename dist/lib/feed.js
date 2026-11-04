@@ -12,6 +12,10 @@
 // - `level` is the plugin's own triage verdict (Jev or rules). Without a verdict (triage off, an
 //   error, not judged yet) a Mentions row is `action` (it names the person, the same floor triage
 //   applies) and a Direct messages row is `fyi`: unjudged is never urgent and never noise.
+// - `recent` (optional, announced through `features()`): the same FeedItems for the READ conversations
+//   of the Recent lane (read, within `recentDays`), newest first, so Inbox can offer "reopen what I
+//   just read". Same cache, same row mapping, same caps; never an API call. Every id it returns is a
+//   row of the view, so `open` accepts it exactly like a click on that row in the panel's Recent lane.
 // - Arguments come from another plugin, so they are checked here (as bronos.jira's service.js): the
 //   limit is clamped, an id must be a string of the Chat id shape and a row of the feed.
 
@@ -20,13 +24,14 @@ const { RANK } = require('./lanes')
 const { jiraKey } = require('./triage')
 
 const FEED_LANES = ['mentions', 'direct']
+const RECENT_LANE = 'recent'
 const LIMIT = { def: 20, min: 1, max: 50 }
 const LEVELS = ['urgent', 'action', 'fyi', 'noise']
 const ID_MAX = 300 // a space or thread resource name is far shorter; bounds what a caller can make us scan
 const CAPS = { title: 300, from: 120, where: 120 }
 
 const DESCRIBE = Object.freeze({ label: 'Chat', badge: 'CHAT', color: 'green', kind: 'chat' })
-const FEATURES = Object.freeze(['markRead'])
+const FEATURES = Object.freeze(['markRead', 'recent'])
 
 function clampLimit(v) {
   if (v === undefined || v === null) return LIMIT.def
@@ -86,6 +91,25 @@ function feedRows(view) {
 }
 
 /**
+ * The Recent lane's conversations of a view. Read rows only: a conversation marked unread here
+ * leaves the lane in buildView already, the filter is the belt to that brace. An empty array when the
+ * lane is hidden (it is then not in `view.lanes`).
+ */
+function recentRows(view) {
+  return (view.lanes || []).filter((l) => l.id === RECENT_LANE).flatMap((l) => l.rows.filter((r) => r.kind === 'conv' && r.conv && !r.unread))
+}
+
+/**
+ * The recently read items, newest message first (then the id, a stable order). No level ordering and
+ * no noise rule: this is a history to reopen from, not a queue.
+ * @param {object[]} rows view rows (recentRows)
+ * @param {number} limit already clamped
+ */
+function recentItems(rows, limit) {
+  return rows.map(feedItem).sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : 1)).slice(0, limit)
+}
+
+/**
  * The items, best first: level, then the newest message, then the id (a stable order). Noise is
  * left out unless nothing else is there (design: the provider has nothing else), then it comes.
  * @param {object[]} rows view rows (feedRows)
@@ -97,4 +121,4 @@ function feedItems(rows, limit) {
   return (kept.length ? kept : all).slice(0, limit)
 }
 
-module.exports = { DESCRIBE, FEATURES, FEED_LANES, LIMIT, itemsOptions, clampLimit, checkId, levelOf, feedItem, feedRows, feedItems }
+module.exports = { DESCRIBE, FEATURES, FEED_LANES, LIMIT, itemsOptions, clampLimit, checkId, levelOf, feedItem, feedRows, feedItems, recentRows, recentItems }

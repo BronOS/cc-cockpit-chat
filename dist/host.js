@@ -88,6 +88,7 @@ function start(ctx, io = {}) {
     state: null, // poll.loadState: the account, the spaces and their rows
     names: createNames(null, now),
     view: { lanes: [], unread: 0 },
+    recentRows: [], // lib/feed.js: the read rows of the Recent lane of that same view (`recent`; open accepts them too)
     feedRows: [], // lib/feed.js: the Mentions and Direct messages rows of the last view of a signed-in run
     gen: 0, // bumped when the client or account changes: a poll of the old one is thrown away
     polling: null, // the running poll's promise: one at a time
@@ -202,7 +203,10 @@ function start(ctx, io = {}) {
   function rebuild() {
     S.view = S.state && ready_() ? buildView({ cfg: cfg(), state: S.state, names: S.names, verdicts: triageOn() ? S.verdicts : {}, marks: S.marks, now: now() }) : { lanes: [], unread: 0 }
     // The inbox-feed answers from the last view of a signed-in run, even once signed out or failing.
-    if (S.state && ready_()) S.feedRows = feed.feedRows(S.view)
+    if (S.state && ready_()) {
+      S.feedRows = feed.feedRows(S.view)
+      S.recentRows = feed.recentRows(S.view)
+    }
     try {
       ctx.badge(PANEL, S.view.unread || null)
     } catch (e) {
@@ -1064,8 +1068,19 @@ function start(ctx, io = {}) {
   /** A feed row by id, or a refusal: a caller can only act on what `items` could have listed. */
   function feedRow(id) {
     const checked = feed.checkId(id)
-    if (!S.feedRows.some((r) => r.id === checked)) throw new Error('chat: that conversation is not among the last poll\'s mentions or direct messages')
+    // Mentions and Direct messages (`items`) and the Recent lane (`recent`): what the feed could have listed.
+    if (!S.feedRows.some((r) => r.id === checked) && !S.recentRows.some((r) => r.id === checked)) throw new Error('chat: that conversation is not among the last poll\'s mentions, direct messages or recent conversations')
     return checked
+  }
+
+  /** The answer of `items` / `recent`: the cached items with the state of the plugin around them. */
+  function feedAnswer(items) {
+    const out = { items, asOf: (S.state && S.state.lastPoll) || 0, state: 'ok' }
+    if (tooOld) return { ...out, state: 'error', message: tooOld }
+    if (!signedIn()) return { ...out, state: 'signedOut', message: (auth && auth.status().signedOutReason) || 'Not signed in to Google.' }
+    if (S.blocked) return { ...out, state: 'error', message: S.blocked }
+    if (S.error) return { ...out, state: 'error', message: cut(oneLine(S.error), 300) }
+    return out
   }
 
   const feedService = {
@@ -1079,12 +1094,13 @@ function start(ctx, io = {}) {
     async items(o) {
       const { limit } = feed.itemsOptions(o)
       await ready
-      const out = { items: feed.feedItems(S.feedRows, limit), asOf: (S.state && S.state.lastPoll) || 0, state: 'ok' }
-      if (tooOld) return { ...out, state: 'error', message: tooOld }
-      if (!signedIn()) return { ...out, state: 'signedOut', message: (auth && auth.status().signedOutReason) || 'Not signed in to Google.' }
-      if (S.blocked) return { ...out, state: 'error', message: S.blocked }
-      if (S.error) return { ...out, state: 'error', message: cut(oneLine(S.error), 300) }
-      return out
+      return feedAnswer(feed.feedItems(S.feedRows, limit))
+    },
+    // Optional (features() says so): the read Recent rows, newest first. Same cache, same states.
+    async recent(o) {
+      const { limit } = feed.itemsOptions(o)
+      await ready
+      return feedAnswer(feed.recentItems(S.recentRows, limit))
     },
     async open(id) {
       await ready

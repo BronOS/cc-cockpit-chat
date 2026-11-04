@@ -117,12 +117,43 @@ test('checkId: strings of the Chat id shape only', () => {
   for (const bad of [undefined, null, 5, {}, [], '', 'x', '../etc', 'spaces/', 'alert:Disk', 'spaces/a b', `spaces/${'A'.repeat(400)}`]) assert.throws(() => feed.checkId(bad), /not a conversation id/, String(bad))
 })
 
+test('recentRows: read conversations of the Recent lane only; hidden lane gives none', () => {
+  const view = {
+    lanes: [
+      { id: 'direct', rows: [vrow('spaces/D')] },
+      { id: 'recent', rows: [vrow('spaces/R1', { lane: 'recent', unread: false }), vrow('spaces/R2', { lane: 'recent', unread: true }), { id: 'alert:X', kind: 'alert', lane: 'recent', unread: false }] },
+    ],
+  }
+  assert.deepEqual(feed.recentRows(view).map((r) => r.id), ['spaces/R1'])
+  assert.deepEqual(feed.recentRows({ lanes: [{ id: 'direct', rows: [vrow('spaces/D')] }] }), [])
+  assert.deepEqual(feed.recentRows({ lanes: [] }), [])
+})
+
+test('recentItems: newest first (then id), no level order, noise kept, same FeedItem as items, limit cuts', () => {
+  const rows = [
+    vrow('spaces/B', { lane: 'recent', unread: false, verdict: { priority: 'urgent' }, at: 100 }),
+    vrow('spaces/C', { lane: 'recent', unread: false, verdict: { priority: 'noise' }, at: 900 }),
+    vrow('spaces/A', { lane: 'recent', unread: false, at: 100 }),
+  ]
+  const out = feed.recentItems(rows, 50)
+  assert.deepEqual(out.map((i) => i.id), ['spaces/C', 'spaces/A', 'spaces/B'])
+  assert.deepEqual(out[1], feed.feedItem(rows[2]))
+  assert.equal(out.every((i) => i.unread === false), true)
+  assert.equal(feed.recentItems(rows, 2).length, 2)
+  assert.deepEqual(feed.recentItems([], 5), [])
+  const many = Array.from({ length: 60 }, (_, i) => vrow(`spaces/R${i}`, { lane: 'recent', unread: false, at: i }))
+  assert.equal(feed.recentItems(many, feed.itemsOptions({ limit: 999 }).limit).length, 50)
+  assert.equal(feed.recentItems(many, feed.itemsOptions({ limit: 0 }).limit).length, 1)
+  assert.equal(feed.recentItems(many, feed.itemsOptions({ limit: 'junk' }).limit).length, 20)
+  assert.equal(feed.recentItems(many, feed.itemsOptions().limit)[0].id, 'spaces/R59')
+})
+
 // ---- the host ----
 
 function boot(opts = {}) {
   const reg = tokens()
   const google = fakeGoogle({ tokens: reg })
-  const ctx = fakeCtx({ project: { alertBots: ['Grafana'] }, oauth: fakeOAuth(reg), triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer })
+  const ctx = fakeCtx({ project: { alertBots: ['Grafana'], ...(opts.project || {}) }, oauth: fakeOAuth(reg), triage: opts.triage === undefined ? fakeTriage() : opts.triage, reviewer: opts.reviewer })
   const h = host._start(ctx, { setInterval: () => 0, clearInterval: () => {}, fetch: google.fetch, now: () => NOW, setTimeout: () => 0, clearTimeout: () => {}, cliWaitMs: 3000 })
   return { ctx, h, google }
 }
@@ -152,9 +183,9 @@ async function signedIn(opts) {
 test('provides inbox-feed with the contract methods; describe and features', async () => {
   const { ctx, h } = boot()
   const svc = ctx.provided['inbox-feed']
-  assert.deepEqual(Object.keys(svc).sort(), ['describe', 'features', 'items', 'markRead', 'open'])
+  assert.deepEqual(Object.keys(svc).sort(), ['describe', 'features', 'items', 'markRead', 'open', 'recent'])
   assert.deepEqual(await svc.describe(), { label: 'Chat', badge: 'CHAT', color: 'green', kind: 'chat' })
-  assert.deepEqual(await svc.features(), ['markRead'])
+  assert.deepEqual(await svc.features(), ['markRead', 'recent'])
   await h.stop()
 })
 
@@ -228,6 +259,83 @@ test('open runs what a row click runs: the conversation goes to the reviewer or 
   await b.ctx.provided['inbox-feed'].open(T1)
   assert.equal(reviewer.calls.length, 1)
   assert.match(reviewer.calls[0].key, /./)
+  await b.h.stop()
+})
+
+test('recent: only read rows of the Recent lane, newest first, from the cache; unread items never appear', async () => {
+  const b = await signedIn()
+  const svc = b.ctx.provided['inbox-feed']
+  const before = b.google.calls.length
+  const r = await svc.recent({ limit: 50 })
+  assert.equal(b.google.calls.length, before, 'recent never calls Google')
+  assert.equal(r.state, 'ok')
+  assert.ok(r.asOf > 0)
+  assert.ok(r.items.length > 0, 'the fake world has read conversations')
+  assert.equal(r.items.every((i) => i.unread === false), true)
+  const unreadIds = (await svc.items({ limit: 50 })).items.map((i) => i.id)
+  assert.equal(r.items.some((i) => unreadIds.includes(i.id)), false)
+  assert.equal(r.items.some((i) => i.id === S.dm || i.id === T1), false)
+  assert.deepEqual(r.items.map((i) => i.at), [...r.items.map((i) => i.at)].sort((a, c) => c - a))
+  assert.deepEqual(r, structuredClone(r))
+  for (const k of ['id', 'rev', 'title', 'from', 'where', 'at', 'level', 'unread', 'direct', 'mentionsMe']) assert.ok(k in r.items[0], k)
+  assert.equal((await svc.recent({ limit: 1 })).items.length, 1)
+  assert.equal((await svc.recent({ limit: 0 })).items.length, 1)
+  assert.equal((await svc.recent({ limit: 999 })).items.length, r.items.length)
+  assert.equal((await svc.recent({ limit: 'junk' })).items.length, r.items.length)
+  assert.equal((await svc.recent()).items.length, r.items.length)
+  await assert.rejects(() => svc.recent('x'), /options are an object/)
+  await b.h.stop()
+})
+
+test('recent: a hidden Recent lane gives no items; signed out gives signedOut; a poll error gives error', async () => {
+  const hidden = await signedIn({ project: { lanes: { recent: false } } })
+  assert.deepEqual((await hidden.ctx.provided['inbox-feed'].recent({})).items, [])
+  assert.equal((await hidden.ctx.provided['inbox-feed'].recent({})).state, 'ok')
+  await hidden.h.stop()
+
+  const out = boot()
+  const r0 = await out.ctx.provided['inbox-feed'].recent({})
+  assert.equal(r0.state, 'signedOut')
+  assert.deepEqual(r0.items, [])
+  assert.equal(typeof r0.message, 'string')
+  await out.h.stop()
+
+  const b = await signedIn()
+  b.h.S.error = 'Google Chat is busy'
+  const e = await b.ctx.provided['inbox-feed'].recent({})
+  assert.equal(e.state, 'error')
+  assert.match(e.message, /busy/)
+  assert.ok(e.items.length > 0)
+  b.h.S.error = null
+  await b.ctx.sendPanel({ type: 'signOut' })
+  assert.equal((await b.ctx.provided['inbox-feed'].recent({})).state, 'signedOut')
+  await b.h.stop()
+})
+
+test('every id recent returns opens through open, as a row click does, and open marks nothing read', async () => {
+  const { fakeReviewer } = require('./fakes')
+  const reviewer = fakeReviewer()
+  const b = await signedIn({ reviewer })
+  const svc = b.ctx.provided['inbox-feed']
+  const r = await svc.recent({ limit: 50 })
+  assert.ok(r.items.length > 0)
+  for (const [n, it] of r.items.entries()) {
+    await svc.open(it.id)
+    assert.equal(reviewer.calls.length, n + 1, it.id)
+  }
+  assert.deepEqual(b.google.writes, [], 'open writes nothing')
+  assert.equal(Object.keys(b.h.S.marks).length, 0, 'open marks nothing')
+  // Unknown ids stay refused, also after the widening.
+  await assert.rejects(() => svc.open('spaces/ZZZ'), /^Error: chat: /)
+  await b.h.stop()
+})
+
+test('markRead on a read (Recent) row is a harmless no-op for the feed', async () => {
+  const b = await signedIn()
+  const svc = b.ctx.provided['inbox-feed']
+  const id = (await svc.recent({})).items[0].id
+  await svc.markRead(id).catch(() => {}) // may refuse a row with no mark target; must not throw anything but chat: errors
+  assert.equal((await svc.recent({ limit: 50 })).items.every((i) => i.unread === false), true)
   await b.h.stop()
 })
 
