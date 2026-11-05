@@ -90,8 +90,7 @@ function start(ctx, io = {}) {
     state: null, // poll.loadState: the account, the spaces and their rows
     names: createNames(null, now),
     view: { lanes: [], unread: 0 },
-    recentRows: [], // lib/feed.js: the read rows of the Recent lane of that same view (`recent`; open accepts them too)
-    feedRows: [], // lib/feed.js: the Mentions and Direct messages rows of the last view of a signed-in run
+    feedRows: [], // lib/feed.js: the rows of every lane of the last view of a signed-in run (the feed's scope)
     gen: 0, // bumped when the client or account changes: a poll of the old one is thrown away
     polling: null, // the running poll's promise: one at a time
     pollAgain: false, // a mark finished during a poll: poll once more when it ends
@@ -205,10 +204,7 @@ function start(ctx, io = {}) {
   function rebuild() {
     S.view = S.state && ready_() ? buildView({ cfg: cfg(), state: S.state, names: S.names, verdicts: triageOn() ? S.verdicts : {}, marks: S.marks, now: now() }) : { lanes: [], unread: 0 }
     // The inbox-feed answers from the last view of a signed-in run, even once signed out or failing.
-    if (S.state && ready_()) {
-      S.feedRows = feed.feedRows(S.view)
-      S.recentRows = feed.recentRows(S.view)
-    }
+    if (S.state && ready_()) S.feedRows = feed.feedRows(S.view)
     try {
       ctx.badge(PANEL, S.view.unread || null)
     } catch (e) {
@@ -290,7 +286,7 @@ function start(ctx, io = {}) {
       } finally {
         S.polling = null
         postState()
-        feedChanged()
+        emitFeed()
         if (S.pollAgain && !S.stopped) {
           S.pollAgain = false
           void pollNow('after a mark', true)
@@ -419,6 +415,7 @@ function start(ctx, io = {}) {
     }
     reschedule()
     rebuild()
+    emitFeed() // a lane switched off or a shorter Recent: those items are gone now
     postState()
     if (signedIn()) void pollNow('settings', true)
   })
@@ -437,6 +434,7 @@ function start(ctx, io = {}) {
         const r = await auth.signIn()
         // A new sign-in may be another Google account: nothing of the last one carries over.
         resetAccount()
+        emitFeed() // Inbox hears the sign-in at once (a sync), not with the first poll
         setNotice(r.sessionOnly ? `Signed in, but only until the app closes: ${r.sessionOnly}. Fix the keychain (ccc guide settings-secrets) and sign in again to stay signed in.` : 'Signed in with Google. Reading your Chat…', r.sessionOnly ? 'error' : 'info')
         ctx.log.info(`signed in (${from})`)
         // A poll of the old account may be running (its result is thrown away): then this one's
@@ -461,6 +459,7 @@ function start(ctx, io = {}) {
     await ready
     await auth.signOut()
     resetAccount()
+    emitFeed() // signedOut, with the last items
     postState()
     return { message: 'Signed out: the stored Google sign-in of this project is deleted.' }
   }
@@ -497,7 +496,10 @@ function start(ctx, io = {}) {
 
   /** The row of an id in the current view, or null. */
   function rowOf(id) {
-    return allRows(S.view).find((x) => x.id === id) || null
+    const rows = allRows(S.view)
+    // A conversation inside an alert group has no row of its own in the panel, but it is an item of the
+    // inbox-feed (open, mark read), so it is found through its group.
+    return rows.find((x) => x.id === id) || rows.flatMap((x) => x.convRows || []).find((x) => x.id === id) || null
   }
 
   function labelOf(id) {
@@ -526,7 +528,7 @@ function start(ctx, io = {}) {
     S.marks[id] = { want, state: 'pending' }
     rebuild()
     postState()
-    feedChanged()
+    emitFeed()
     try {
       const r = await applyMark(chat, target, want, abort.signal)
       S.marks[id] = { want, state: 'done', doneAt: now() }
@@ -535,7 +537,7 @@ function start(ctx, io = {}) {
       await saveState()
       rebuild()
       postState()
-      feedChanged()
+      emitFeed()
       ctx.log.info(`marked ${id} ${want} (${r.changed.length} space read time${r.changed.length === 1 ? '' : 's'} moved)`)
       if (S.polling) S.pollAgain = true
       else void pollNow('mark', true)
@@ -545,7 +547,7 @@ function start(ctx, io = {}) {
     } catch (e) {
       delete S.marks[id]
       rebuild()
-      feedChanged()
+      emitFeed()
       const why = e && e.message ? e.message : String(e)
       if (e && e.kind === 'scope') S.accountChecked = false
       const text = `Could not mark ${label} ${want} in Google Chat: ${why}. It is shown as before.`
@@ -888,6 +890,7 @@ function start(ctx, io = {}) {
       clientError: S.clientError,
       problems: st.problems,
       account: (S.state && S.state.account) || '',
+      scope: feed.scopeLine(cfg()),
       meKnown: Boolean(me()),
       lastPoll: (S.state && S.state.lastPoll) || 0,
       polling: Boolean(S.polling),
@@ -1112,70 +1115,102 @@ function start(ctx, io = {}) {
     )
   })
 
-  // ---- the inbox-feed service (lib/feed.js) ----
+  // ---- the inbox-feed service (v2, lib/feed.js; Inbox reads it, cc-cockpit 0.9.7+) ----
 
-  /** Tell Inbox the cache changed (a poll ended, a read state moved). Never throws: a plugin host without the member just does not tell. */
-  function feedChanged() {
-    if (S.stopped || typeof ctx.services.emit !== 'function') return
+  const sent = { items: new Map(), key: null, started: false } // what Inbox was last told: id -> item, the Sync state it saw, and whether the first sync went out
+
+  /** All items of the scope (`limit`: the contract's 1000 by default). */
+  function feedList(limit) {
+    return feed.feedItems(S.feedRows, { limit })
+  }
+
+  /** `ok`, `signedOut` or `error`, with the message the Sync carries. */
+  function feedState() {
+    if (tooOld) return { state: 'error', message: cut(oneLine(tooOld), 300) }
+    if (!signedIn()) return { state: 'signedOut', message: cut(oneLine((auth && auth.status().signedOutReason) || 'Not signed in to Google.'), 300) }
+    if (S.blocked) return { state: 'error', message: cut(oneLine(S.blocked), 300) }
+    if (S.error) return { state: 'error', message: cut(oneLine(S.error), 300) }
+    return { state: 'ok' }
+  }
+  const stateKey = (st) => `${st.state}|${st.message || ''}`
+
+  /** The Sync: the whole list from the cache, and the baseline the next diff starts from. */
+  function feedSync() {
+    const items = feedList()
+    const st = feedState()
+    sent.items = new Map(items.map((i) => [i.id, i]))
+    sent.key = stateKey(st)
+    return { items, ...st, asOf: (S.state && S.state.lastPoll) || now() }
+  }
+
+  function feedEmit(event, data) {
     try {
-      ctx.services.emit('inbox-feed', 'changed', {})
+      ctx.services.emit('inbox-feed', event, data)
     } catch (e) {
-      ctx.log.warn('inbox-feed changed:', e.message)
+      ctx.log.warn(`inbox-feed ${event}:`, e && e.message ? e.message : e)
     }
   }
 
-  /** A feed row by id, or a refusal: a caller can only act on what `items` could have listed. */
-  function feedRow(id) {
-    const checked = feed.checkId(id)
-    // Mentions and Direct messages (`items`) and the Recent lane (`recent`): what the feed could have listed.
-    if (!S.feedRows.some((r) => r.id === checked) && !S.recentRows.some((r) => r.id === checked)) throw new Error('chat: that conversation is not among the last poll\'s mentions, direct messages or recent conversations')
-    return checked
+  /**
+   * Tell Inbox what changed since it was last told (after a poll, a mark, a sign-in): `item` per
+   * changed or new conversation, `gone` for the missing ones. A change of the Sync state (a sign-in,
+   * an error, a recovery) is a `sync` instead: the source is unsure it told everything. The message
+   * counts as well as the kind, or error A -> error B would stay stale in Inbox. Nothing before the
+   * first sync (activate's cached view). Never throws: an older app has no listener to reach.
+   */
+  function emitFeed() {
+    if (S.stopped || !sent.started || !ctx.services || typeof ctx.services.emit !== 'function') return
+    try {
+      if (stateKey(feedState()) !== sent.key) return feedEmit('sync', feedSync())
+      const next = feedList()
+      const d = feed.diffFeed(sent.items, next)
+      sent.items = new Map(next.map((i) => [i.id, i]))
+      for (const it of d.items) feedEmit('item', it)
+      for (const ids of feed.goneChunks(d.gone)) feedEmit('gone', { ids })
+    } catch (e) {
+      ctx.log.warn('inbox-feed:', e && e.message ? e.message : e)
+    }
   }
 
-  /** The answer of `items` / `recent`: the cached items with the state of the plugin around them. */
-  function feedAnswer(items) {
-    const out = { items, asOf: (S.state && S.state.lastPoll) || 0, state: 'ok' }
-    if (tooOld) return { ...out, state: 'error', message: tooOld }
-    if (!signedIn()) return { ...out, state: 'signedOut', message: (auth && auth.status().signedOutReason) || 'Not signed in to Google.' }
-    if (S.blocked) return { ...out, state: 'error', message: S.blocked }
-    if (S.error) return { ...out, state: 'error', message: cut(oneLine(S.error), 300) }
-    return out
+  void ready.then(() => {
+    if (S.stopped || !ctx.services || typeof ctx.services.emit !== 'function') return
+    sent.started = true
+    feedEmit('sync', feedSync())
+  })
+
+  /** One of the item's own actions, as a row click or the panel's mark does it. Never rejects. */
+  async function feedAct(id, action) {
+    await ready
+    const refuse = (message) => ({ ok: false, message: cut(oneLine(message), 300) })
+    if (typeof id !== 'string' || typeof action !== 'string') return refuse('chat: act takes an item id and an action id')
+    const item = feedList(Infinity).find((i) => i.id === id)
+    if (!item) return refuse('chat: that conversation is not in the inbox feed (refresh?)')
+    if (!item.actions.some((a) => a.id === action)) return refuse(`chat: this conversation has no action "${cut(action, 40)}"`)
+    try {
+      if (action === 'open') await openConversation(id)
+      else {
+        const r = await markRow(id, action === 'markUnread' ? 'unread' : 'read', { quiet: true })
+        if (r.error) return refuse(`chat: ${r.error}`)
+      }
+      return { ok: true }
+    } catch (e) {
+      return refuse(`chat: ${e && e.message ? e.message : e}`)
+    }
   }
 
   const feedService = {
     async describe() {
-      return { ...feed.DESCRIBE }
+      return { ...feed.DESCRIBE, scope: feed.scopeLine(cfg()) }
     },
     async features() {
       return [...feed.FEATURES]
     },
-    // From the cache only: never a Google call, so Inbox can ask as often as it likes.
-    async items(o) {
-      const { limit } = feed.itemsOptions(o)
+    // From the cache only: never a Google call, so Inbox can ask whenever a provider joins.
+    async snapshot() {
       await ready
-      return feedAnswer(feed.feedItems(S.feedRows, limit))
+      return feedSync()
     },
-    // Optional (features() says so): the read Recent rows, newest first. Same cache, same states.
-    async recent(o) {
-      const { limit } = feed.itemsOptions(o)
-      await ready
-      return feedAnswer(feed.recentItems(S.recentRows, limit))
-    },
-    async open(id) {
-      await ready
-      await openConversation(feedRow(id))
-    },
-    async markRead(id) {
-      await ready
-      const r = await markRow(feedRow(id), 'read', { quiet: true })
-      if (r.error) throw new Error(`chat: ${cut(oneLine(r.error), 300)}`)
-    },
-    // Optional (features() says so): the panel's own Mark unread (markRow 'unread'); an alert row is refused as there.
-    async markUnread(id) {
-      await ready
-      const r = await markRow(feedRow(id), 'unread', { quiet: true })
-      if (r.error) throw new Error(`chat: ${cut(oneLine(r.error), 300)}`)
-    },
+    act: (id, action) => feedAct(id, action),
   }
   // Providing needs nothing newer than the app's services; Inbox reading it needs 0.9.7 (useAll).
   if (ctx.services && typeof ctx.services.provide === 'function') ctx.services.provide('inbox-feed', feedService)

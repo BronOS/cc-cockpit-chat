@@ -99,16 +99,26 @@ storage, so after a reinstall you only sign in again.
 
 ## Inbox
 
-From 0.2.0 the plugin provides the `inbox-feed` service (v1) to the Inbox plugin, which lists what
-needs you across Chat, mail and issues. The feed is the Mentions and Direct messages rows of this
-panel, best first by the same triage (urgent, action, fyi; noise only when nothing else is there),
-read from the plugin's cache: Inbox asking never calls Google. An item's `rev` is its newest message,
-so Inbox can hold a done item back until a new message arrives. Opening an item does what a row click
-does, and Mark read is the panel's own Mark read. Without a triage verdict a mention counts as action
-and a direct message as fyi. The optional `recent` method (announced through `features()`) lists the read
-conversations of the Recent lane, newest first, from the same cache, so Inbox can reopen one; opening
-it marks nothing read. The optional `markUnread` method is the panel's own Mark unread, so Inbox can
-offer it on those read rows; a thread, which Chat's API cannot mark unread, says `canUnread: false`. Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
+Since 0.3.0 the plugin provides the `inbox-feed` service (v2) to the Inbox plugin, which merges Chat,
+Mail, Jira and more into one list and applies its own rules. The feed is the plugin's scope: the
+**unread conversations of every lane that is on** (Mentions, Direct messages, Spaces, Alerts) and the
+**read conversations of the Recent lane** (the last `recentDays`, at most `maxRecent`); a lane you
+switched off is not in it. Alert groups are a panel idea: each conversation of a group is its own
+item, labelled `alert` and `alert:<name>`. Each item carries what rules can use: the conversation's
+name, a preview of the latest message, who wrote it, whether it is a direct message (`direct`) or a
+group chat or space (`group`), whether it names you (`mentionsMe`; `@all` is the label `mention:all`),
+read or unread, the space's display name, the label `jira:ABC-12` for a Jira key in the text, and the
+actions open, mark read / mark unread. An item's `rev` is its newest message, so a new message changes
+it and a read change does not. A thread whose newest message is a reply cannot be marked in Chat's
+API (see below), so its item offers only open. The triage verdicts of the panel stay in the panel.
+It is built from the rows the panel already holds, never with a Google call. The plugin tells Inbox
+what changed after each poll and each mark (an `item` per changed conversation, `gone` for one that
+left the scope) and sends the whole list when it starts, after a sign-in and whenever its state
+changes (an error, a recovery, a different error message). Inbox can open a conversation (the same
+as a click on its row) and mark it read or unread (the same write as Mark read). The panel's footer
+shows the scope line Inbox sees. Nothing leaves your machine: the data goes to another plugin of the
+same project. Inbox 0.2.0 reads v2; an older Inbox (v1) no longer gets Chat from this version.
+Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
 
 ## Read state: what Mark read and Mark unread change
 

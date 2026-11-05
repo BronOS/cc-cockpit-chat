@@ -1,15 +1,18 @@
 'use strict'
-// The inbox-feed service: the pure mapping (lib/feed.js) on made-up rows, then the host's provider
-// over the fake Google (never a Google call for `items`, the refusals, `changed`, and an app whose
-// services have no `useAll`).
+// The inbox-feed service (v2): the pure mapping (lib/feed.js) on made-up rows, then the host's
+// provider over the fake Google (snapshot from the cache, act, the events a diff makes, the sync
+// triggers, and an app whose services have no useAll).
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const host = require('../dist/host')
 const feed = require('../dist/lib/feed')
-const { fakeGoogle, fakeOAuth, fakeCtx, fakeTriage, tokens, fixture, NOW, S } = require('./fakes')
+const { readSettings } = require('../dist/lib/settings')
+const { fakeGoogle, fakeOAuth, fakeCtx, fakeTriage, fakeReviewer, tokens, fixture, NOW, S } = require('./fakes')
 
 const CLIENT_FILE = JSON.stringify(fixture('client_secret.json'))
 const T1 = `${S.team}/threads/T1`
+const T2 = `${S.team}/threads/T2`
+const T3 = `${S.team}/threads/T3`
 
 // ---- the pure mapping ----
 
@@ -22,7 +25,7 @@ function vrow(id, o = {}) {
     lane: o.lane || 'direct',
     at: o.at === undefined ? 1000 : o.at,
     unread: o.unread === undefined ? true : o.unread,
-    verdict: o.verdict === undefined ? { priority: 'fyi' } : o.verdict,
+    verdict: { priority: 'fyi' },
     title: o.title || 'Ann Example',
     preview: o.preview || 'Hello there',
     where: o.where || 'Direct message',
@@ -33,125 +36,130 @@ function vrow(id, o = {}) {
   }
 }
 
-test('a row becomes a FeedItem: ids, rev = the latest message name, flags, caps', () => {
-  const r = vrow('spaces/AAA', { latest: 'M7', verdict: { priority: 'urgent' }, mentioned: 'me', kind: 'dm', preview: 'x'.repeat(500), from: 'y'.repeat(300), at: 5000 })
-  const it = feed.feedItem(r)
-  assert.deepEqual(Object.keys(it).sort(), ['at', 'direct', 'from', 'id', 'level', 'mentionsMe', 'rev', 'title', 'unread', 'where'])
-  assert.equal(it.id, 'spaces/AAA')
-  assert.equal(it.rev, 'spaces/AAA/messages/M7')
-  assert.equal(it.level, 'urgent')
-  assert.equal(it.direct, true)
-  assert.equal(it.mentionsMe, true)
-  assert.equal(it.unread, true)
-  assert.equal(it.at, 5000)
+const cfgOf = (project = {}) => readSettings(project).cfg
+
+test('feedItem: every field of the contract; rev is the latest message name, time the newest, place the space', () => {
+  const it = feed.feedItem(vrow('spaces/AAA', { latest: 'M7', mentioned: 'me', kind: 'space', where: 'Acme Team', at: 5000 }))
+  assert.deepEqual(it, {
+    id: 'spaces/AAA',
+    rev: 'spaces/AAA/messages/M7',
+    title: 'Ann Example',
+    time: 5000,
+    read: false,
+    actions: [{ id: 'open', label: 'Open' }, { id: 'markRead', label: 'Mark read' }],
+    preview: 'Hello there',
+    from: { name: 'Ann Example' },
+    to: 'group',
+    mentionsMe: true,
+    place: { kind: 'channel', name: 'Acme Team' },
+  })
+  assert.deepEqual(feed.feedItem(vrow('spaces/DDD', { kind: 'dm' })).to, 'direct')
+  assert.deepEqual(feed.feedItem(vrow('spaces/GGG', { kind: 'group' })).to, 'group')
+  assert.equal('level' in it || 'canUnread' in it || 'jiraKey' in it || 'unread' in it, false, 'the v1 fields are gone')
+})
+
+test('feedItem: a read row offers markUnread; no mark target (a thread reply) offers open only; rev ignores a read change', () => {
+  const read = feed.feedItem(vrow('spaces/A', { unread: false }))
+  assert.equal(read.read, true)
+  assert.deepEqual(read.actions.map((a) => a.id), ['open', 'markUnread'])
+  assert.deepEqual(feed.feedItem(vrow('spaces/A/threads/T', { target: null })).actions.map((a) => a.id), ['open'])
+  assert.deepEqual(feed.feedItem(vrow('spaces/A/threads/T', { target: null, unread: false })).actions.map((a) => a.id), ['open'])
+  assert.equal(feed.feedItem(vrow('spaces/A', { latest: 'M1' })).rev, read.rev)
+  assert.notEqual(feed.feedItem(vrow('spaces/A', { latest: 'M2' })).rev, read.rev)
+})
+
+test('feedItem: caps (title 300, preview 1000, name 120, place 120, rev 100), labels from @all, alerts and a Jira key, no duplicates', () => {
+  const r = vrow('spaces/AAA', { title: 'x'.repeat(500), preview: 'y'.repeat(2000), from: 'f'.repeat(300), where: 'w'.repeat(300), mentioned: 'all', text: 'see ABC-123 and ABC-123' })
+  const it = feed.feedItem(r, { alerts: ['HighCPU', 'z'.repeat(100), 'HighCPU'] })
   assert.equal(it.title.length, 300)
-  assert.equal(it.from.length, 120)
-  assert.equal(feed.feedItem(vrow('spaces/AAA', { kind: 'space', lane: 'mentions' })).direct, false)
-  assert.equal(feed.feedItem(vrow('spaces/AAA', { kind: 'group' })).direct, true)
+  assert.equal(it.preview.length, 1000)
+  assert.equal(it.from.name.length, 120)
+  assert.equal(it.place.name.length, 120)
+  assert.deepEqual(it.labels.slice(0, 3), ['mention:all', 'alert', 'alert:HighCPU'])
+  assert.ok(it.labels.every((l) => l.length <= 40))
+  assert.ok(it.labels.includes('jira:ABC-123'))
+  assert.equal(it.mentionsMe, undefined)
+  const long = feed.feedItem(vrow('spaces/AAA', { latest: 'M'.repeat(300) }))
+  assert.ok(long.rev.length <= 100)
+  assert.notEqual(long.rev, feed.feedItem(vrow('spaces/AAA', { latest: 'M'.repeat(299) + 'N' })).rev)
+  assert.equal(feed.feedItem(vrow('spaces/' + 'a'.repeat(250))), null, 'an id over 200 characters cannot be an item')
+  assert.equal(feed.feedItem(vrow('')), null)
 })
 
-test('rev changes with a new message and with nothing else', () => {
-  const a = feed.feedItem(vrow('spaces/AAA', { latest: 'M1' }))
-  const same = feed.feedItem(vrow('spaces/AAA', { latest: 'M1', unread: false, verdict: { priority: 'action' }, at: 9 }))
-  const next = feed.feedItem(vrow('spaces/AAA', { latest: 'M2' }))
-  assert.equal(a.rev, same.rev)
-  assert.notEqual(a.rev, next.rev)
-})
-
-test('level: the verdict; without one a mention is action and a DM fyi; an unknown priority falls back', () => {
-  for (const p of ['urgent', 'action', 'fyi', 'noise']) assert.equal(feed.levelOf(vrow('spaces/A', { verdict: { priority: p } })), p)
-  assert.equal(feed.levelOf(vrow('spaces/A', { verdict: null, lane: 'mentions' })), 'action')
-  assert.equal(feed.levelOf(vrow('spaces/A', { verdict: null, lane: 'direct' })), 'fyi')
-  assert.equal(feed.levelOf(vrow('spaces/A', { verdict: { priority: 'bogus' }, lane: 'direct' })), 'fyi')
-})
-
-test('a Jira key in the conversation is passed through, none otherwise', () => {
-  const r = vrow('spaces/A')
-  r.conv.latest.text = 'Please look at ABC-123 today'
-  assert.equal(feed.feedItem(r).jiraKey, 'ABC-123')
-  assert.equal('jiraKey' in feed.feedItem(vrow('spaces/B')), false)
-})
-
-test('canUnread: false only on a row with no mark target (a thread); absent otherwise', () => {
-  assert.equal('canUnread' in feed.feedItem(vrow('spaces/A')), false)
-  assert.equal(feed.feedItem(vrow('spaces/A/threads/T', { target: null, unread: false })).canUnread, false)
-})
-
-test('order: level, then the newest, then the id; noise only when nothing else', () => {
-  const rows = [
-    vrow('spaces/B', { verdict: { priority: 'fyi' }, at: 300 }),
-    vrow('spaces/C', { verdict: { priority: 'noise' }, at: 900 }),
-    vrow('spaces/D', { verdict: { priority: 'urgent' }, at: 100 }),
-    vrow('spaces/E', { verdict: { priority: 'fyi' }, at: 300 }),
-    vrow('spaces/F', { verdict: { priority: 'action' }, at: 50 }),
-    vrow('spaces/G', { verdict: { priority: 'fyi' }, at: 400 }),
-  ]
-  assert.deepEqual(feed.feedItems(rows, 50).map((i) => i.id), ['spaces/D', 'spaces/F', 'spaces/G', 'spaces/B', 'spaces/E'])
-  const onlyNoise = [vrow('spaces/N1', { verdict: { priority: 'noise' }, at: 1 }), vrow('spaces/N2', { verdict: { priority: 'noise' }, at: 2 })]
-  assert.deepEqual(feed.feedItems(onlyNoise, 50).map((i) => i.id), ['spaces/N2', 'spaces/N1'])
-  assert.deepEqual(feed.feedItems([], 50), [])
-})
-
-test('limit: clamped to 1..50, default 20, junk refused or defaulted', () => {
-  const rows = Array.from({ length: 60 }, (_, i) => vrow(`spaces/R${i}`, { at: i }))
-  assert.equal(feed.feedItems(rows, feed.itemsOptions({ limit: 500 }).limit).length, 50)
-  assert.equal(feed.feedItems(rows, feed.itemsOptions({ limit: 0 }).limit).length, 1)
-  assert.equal(feed.feedItems(rows, feed.itemsOptions({ limit: -4 }).limit).length, 1)
-  assert.equal(feed.feedItems(rows, feed.itemsOptions({ limit: 3.9 }).limit).length, 3)
-  assert.equal(feed.itemsOptions().limit, 20)
-  assert.equal(feed.itemsOptions({ limit: 'many' }).limit, 20)
-  assert.throws(() => feed.itemsOptions('x'), /options are an object/)
-  assert.throws(() => feed.itemsOptions([]), /options are an object/)
-})
-
-test('feedRows: Mentions and Direct messages conversations only', () => {
+test('feedRows and feedItems: every lane, an alert group as one item per conversation, newest first, deduplicated, limit cuts', () => {
   const view = {
     lanes: [
-      { id: 'mentions', rows: [vrow('spaces/M', { lane: 'mentions' })] },
-      { id: 'direct', rows: [vrow('spaces/D')] },
-      { id: 'spaces', rows: [vrow('spaces/S', { lane: 'spaces' })] },
-      { id: 'alerts', rows: [{ id: 'alert:Disk', kind: 'alert', lane: 'alerts' }] },
-      { id: 'recent', rows: [vrow('spaces/R', { lane: 'recent' })] },
+      { id: 'mentions', rows: [vrow('spaces/M', { at: 30 })] },
+      { id: 'direct', rows: [vrow('spaces/D', { at: 10 })] },
+      {
+        id: 'alerts',
+        rows: [
+          { id: 'alert:HighCPU', kind: 'alert', group: { name: 'HighCPU' }, convRows: [vrow('spaces/AL', { at: 50 }), vrow('spaces/AL2', { at: 5 })] },
+          { id: 'alert:Disk', kind: 'alert', group: { name: 'Disk' }, convRows: [vrow('spaces/AL', { at: 50 })] },
+        ],
+      },
+      { id: 'recent', rows: [vrow('spaces/R', { at: 20, unread: false })] },
     ],
   }
-  assert.deepEqual(feed.feedRows(view).map((r) => r.id), ['spaces/M', 'spaces/D'])
+  const rows = feed.feedRows(view)
+  assert.equal(rows.length, 5)
+  const items = feed.feedItems(rows)
+  assert.deepEqual(items.map((i) => i.id), ['spaces/AL', 'spaces/M', 'spaces/R', 'spaces/D', 'spaces/AL2'])
+  assert.deepEqual(items[0].labels, ['alert', 'alert:HighCPU', 'alert:Disk'], 'one conversation in two groups: one item, both names')
+  assert.deepEqual(items[4].labels, ['alert', 'alert:HighCPU'])
+  assert.equal(items[2].read, true)
+  assert.equal(feed.feedItems(rows, { limit: 2 }).length, 2)
+  assert.equal(feed.feedItems(rows, { limit: Infinity }).length, 5)
+  // A stable order for equal times: the id.
+  const tie = feed.feedItems([vrow('spaces/B', { at: 1 }), vrow('spaces/A', { at: 1 })])
+  assert.deepEqual(tie.map((i) => i.id), ['spaces/A', 'spaces/B'])
+  // At most 1000.
+  const many = Array.from({ length: 1100 }, (_, i) => vrow(`spaces/X${i}`, { at: i + 1 }))
+  const capped = feed.feedItems(many)
+  assert.equal(capped.length, 1000)
+  assert.equal(capped[0].id, 'spaces/X1099')
 })
 
-test('checkId: strings of the Chat id shape only', () => {
-  assert.equal(feed.checkId('spaces/AAA'), 'spaces/AAA')
-  assert.equal(feed.checkId('spaces/AAA/threads/T1'), 'spaces/AAA/threads/T1')
-  for (const bad of [undefined, null, 5, {}, [], '', 'x', '../etc', 'spaces/', 'alert:Disk', 'spaces/a b', `spaces/${'A'.repeat(400)}`]) assert.throws(() => feed.checkId(bad), /not a conversation id/, String(bad))
-})
-
-test('recentRows: read conversations of the Recent lane only; hidden lane gives none', () => {
-  const view = {
-    lanes: [
-      { id: 'direct', rows: [vrow('spaces/D')] },
-      { id: 'recent', rows: [vrow('spaces/R1', { lane: 'recent', unread: false }), vrow('spaces/R2', { lane: 'recent', unread: true }), { id: 'alert:X', kind: 'alert', lane: 'recent', unread: false }] },
-    ],
-  }
-  assert.deepEqual(feed.recentRows(view).map((r) => r.id), ['spaces/R1'])
-  assert.deepEqual(feed.recentRows({ lanes: [{ id: 'direct', rows: [vrow('spaces/D')] }] }), [])
-  assert.deepEqual(feed.recentRows({ lanes: [] }), [])
-})
-
-test('recentItems: newest first (then id), no level order, noise kept, same FeedItem as items, limit cuts', () => {
-  const rows = [
-    vrow('spaces/B', { lane: 'recent', unread: false, verdict: { priority: 'urgent' }, at: 100 }),
-    vrow('spaces/C', { lane: 'recent', unread: false, verdict: { priority: 'noise' }, at: 900 }),
-    vrow('spaces/A', { lane: 'recent', unread: false, at: 100 }),
+test('diffFeed: new and changed (each field) are items, missing ids are gone, a no-op is nothing', () => {
+  const a = feed.feedItem(vrow('spaces/A'))
+  const b = feed.feedItem(vrow('spaces/B'))
+  assert.deepEqual(feed.diffFeed([a, b], [a, b]), { items: [], gone: [] })
+  assert.deepEqual(feed.diffFeed([], [a]), { items: [a], gone: [] })
+  assert.deepEqual(feed.diffFeed([a, b], [a]), { items: [], gone: ['spaces/B'] })
+  assert.deepEqual(feed.diffFeed(new Map([[a.id, a]]), [a, b]).items, [b])
+  const changes = [
+    { rev: 'x' }, { title: 'other' }, { preview: 'other' }, { time: 2 }, { read: true }, { from: { name: 'Bob' } },
+    { to: 'group' }, { mentionsMe: true }, { place: { kind: 'channel', name: 'Other' } }, { labels: ['alert'] }, { actions: [{ id: 'open', label: 'Open' }] },
   ]
-  const out = feed.recentItems(rows, 50)
-  assert.deepEqual(out.map((i) => i.id), ['spaces/C', 'spaces/A', 'spaces/B'])
-  assert.deepEqual(out[1], feed.feedItem(rows[2]))
-  assert.equal(out.every((i) => i.unread === false), true)
-  assert.equal(feed.recentItems(rows, 2).length, 2)
-  assert.deepEqual(feed.recentItems([], 5), [])
-  const many = Array.from({ length: 60 }, (_, i) => vrow(`spaces/R${i}`, { lane: 'recent', unread: false, at: i }))
-  assert.equal(feed.recentItems(many, feed.itemsOptions({ limit: 999 }).limit).length, 50)
-  assert.equal(feed.recentItems(many, feed.itemsOptions({ limit: 0 }).limit).length, 1)
-  assert.equal(feed.recentItems(many, feed.itemsOptions({ limit: 'junk' }).limit).length, 20)
-  assert.equal(feed.recentItems(many, feed.itemsOptions().limit)[0].id, 'spaces/R59')
+  for (const c of changes) assert.deepEqual(feed.diffFeed([a], [{ ...a, ...c }]), { items: [{ ...a, ...c }], gone: [] }, Object.keys(c)[0])
+  // Key order does not matter.
+  const shuffled = Object.fromEntries(Object.entries(a).reverse())
+  assert.deepEqual(feed.diffFeed([a], [shuffled]), { items: [], gone: [] })
+})
+
+test('goneChunks: at most 500 ids to an event', () => {
+  const ids = Array.from({ length: 1201 }, (_, i) => `spaces/${i}`)
+  assert.deepEqual(feed.goneChunks(ids).map((c) => c.length), [500, 500, 201])
+  assert.deepEqual(feed.goneChunks([]), [])
+})
+
+test('scopeLine: accurate for every combination of lanes, at most 120 characters', () => {
+  const line = (project) => feed.scopeLine(cfgOf(project))
+  assert.equal(line({}), 'unread conversations + read of the last 2 days (newest 10)')
+  assert.equal(line({ recentDays: 7, maxRecent: 30 }), 'unread conversations + read of the last 7 days (newest 30)')
+  // Alert bots add the Alerts lane: all four on is still "every".
+  assert.equal(line({ alertBots: ['Grafana'] }), 'unread conversations + read of the last 2 days (newest 10)')
+  assert.equal(line({ alertBots: ['Grafana'], lanes: { alerts: false } }), 'unread mentions, direct messages and spaces + read of the last 2 days (newest 10)')
+  assert.equal(line({ lanes: { spaces: false } }), 'unread mentions and direct messages + read of the last 2 days (newest 10)')
+  assert.equal(line({ alertBots: ['Grafana'], lanes: { spaces: false, direct: false } }), 'unread mentions and alerts + read of the last 2 days (newest 10)')
+  assert.equal(line({ lanes: { mentions: false, direct: false } }), 'unread spaces + read of the last 2 days (newest 10)')
+  assert.equal(line({ lanes: { recent: false } }), 'unread conversations')
+  assert.equal(line({ lanes: { mentions: false, direct: false, spaces: false } }), 'read of the last 2 days (newest 10)')
+  assert.equal(line({ alertBots: ['Grafana'], lanes: { mentions: false, direct: false, spaces: false, recent: false } }), 'unread alerts')
+  assert.equal(line({ lanes: { mentions: false, direct: false, spaces: false, recent: false } }), 'nothing (every lane is off)')
+  // Alerts on but no bots: there is no such lane, so it is not named.
+  assert.doesNotMatch(line({ lanes: { spaces: false } }), /alerts/)
+  assert.ok(feed.scopeLine({ lanes: {}, alertBots: [], recentDays: 2, maxRecent: 10 }).length <= 120)
 })
 
 // ---- the host ----
@@ -172,242 +180,301 @@ async function until(fn, ms = 2000) {
   }
 }
 
+async function settle(b) {
+  for (let i = 0; i < 5; i++) {
+    await b.h.S.polling
+    await b.h.S.classifying
+    await new Promise((r) => setTimeout(r, 2))
+  }
+}
+
 async function signedIn(opts) {
   const b = boot(opts)
   await b.h.ready
   await b.ctx.sendPanel({ type: 'client', text: CLIENT_FILE })
   await b.ctx.sendPanel({ type: 'signIn' })
   await until(() => b.h.S.state && b.h.S.state.lastPoll)
-  for (let i = 0; i < 5; i++) {
-    await b.h.S.polling
-    await b.h.S.classifying
-    await new Promise((r) => setTimeout(r, 2))
-  }
+  await settle(b)
   return b
 }
 
-test('provides inbox-feed with the contract methods; describe and features', async () => {
-  const { ctx, h } = boot()
+const events = (b, ...names) => b.ctx.emitted.filter((e) => e.name === 'inbox-feed' && (!names.length || names.includes(e.event)))
+const svcOf = (b) => b.ctx.provided['inbox-feed']
+
+test('provides inbox-feed v2 with the contract methods and describes itself with its scope', async () => {
+  const { ctx, h } = boot({ project: { lanes: { spaces: false } } })
   const svc = ctx.provided['inbox-feed']
-  assert.deepEqual(Object.keys(svc).sort(), ['describe', 'features', 'items', 'markRead', 'markUnread', 'open', 'recent'])
-  assert.deepEqual(await svc.describe(), { label: 'Chat', badge: 'CHAT', color: 'green', kind: 'chat' })
-  assert.deepEqual(await svc.features(), ['markRead', 'recent', 'markUnread'])
+  assert.deepEqual(Object.keys(svc).sort(), ['act', 'describe', 'features', 'snapshot'])
+  assert.deepEqual(await svc.describe(), { label: 'Chat', badge: 'CHAT', color: 'green', kind: 'chat', scope: 'unread mentions, direct messages and alerts + read of the last 2 days (newest 10)' })
+  assert.deepEqual(await svc.features(), [])
   await h.stop()
 })
 
-test('items before any sign-in: signedOut, no items, no Google call', async () => {
-  const { ctx, h, google } = boot()
-  const r = await ctx.provided['inbox-feed'].items({ limit: 5 })
-  assert.equal(r.state, 'signedOut')
-  assert.deepEqual(r.items, [])
-  assert.equal(typeof r.message, 'string')
-  assert.equal(google.calls.length, 0)
-  await h.stop()
-})
-
-test('items from the cache after a poll: the mention and the DM, best first, state ok, no new Google call', async () => {
+test('snapshot, signed in: every lane and the Recent lane from the cache, no Google call, plain data', async () => {
   const b = await signedIn()
   const before = b.google.calls.length
-  const r = await b.ctx.provided['inbox-feed'].items({ limit: 50 })
-  assert.equal(b.google.calls.length, before, 'items never calls Google')
+  const r = await svcOf(b).snapshot()
+  assert.equal(b.google.calls.length, before, 'snapshot never calls Google')
   assert.equal(r.state, 'ok')
+  assert.equal(r.message, undefined)
   assert.ok(r.asOf > 0)
-  const ids = r.items.map((i) => i.id)
+  assert.deepEqual(r, structuredClone(r))
+  const by = Object.fromEntries(r.items.map((i) => [i.id, i]))
+  assert.deepEqual(Object.keys(by).sort(), [S.dm, T1, T2, T3, S.alerts, S.random].sort())
+  // Unread: the DM, the mention thread, the lunch thread (a Spaces row) and the alert conversation.
+  assert.equal(by[S.dm].read, false)
+  assert.equal(by[S.dm].to, 'direct')
+  assert.equal(by[S.dm].place.kind, 'channel')
+  assert.equal(by[T1].mentionsMe, true)
+  assert.equal(by[T1].to, 'group')
+  assert.equal(by[T1].place.name, 'Acme Team')
+  assert.match(by[T1].rev, /T1R1$/)
+  assert.deepEqual(by[T1].actions.map((a) => a.id), ['open', 'markRead'])
+  assert.equal(by[T2].read, false)
+  assert.deepEqual(by[S.alerts].labels, ['alert', 'alert:HighCPU'])
+  assert.equal(by[S.alerts].read, false)
+  // Read, in Recent: a flat space can be marked unread; a thread reply cannot (open only).
+  assert.equal(by[S.random].read, true)
+  assert.deepEqual(by[S.random].actions.map((a) => a.id), ['open', 'markUnread'])
+  assert.equal(by[T3].read, true)
+  assert.deepEqual(by[T3].actions.map((a) => a.id), ['open'])
+  // Newest first.
+  assert.deepEqual(r.items.map((i) => i.time), [...r.items.map((i) => i.time)].sort((a, c) => c - a))
+  for (const it of r.items) for (const k of Object.keys(it)) assert.ok(['id', 'rev', 'title', 'preview', 'time', 'from', 'to', 'mentionsMe', 'read', 'place', 'labels', 'actions'].includes(k), k)
+  await b.h.stop()
+})
+
+test('snapshot: hidden lanes and a hidden Recent lane leave their conversations out', async () => {
+  const b = await signedIn({ project: { lanes: { recent: false, spaces: false, alerts: false } } })
+  const ids = (await svcOf(b).snapshot()).items.map((i) => i.id)
+  assert.equal(ids.includes(S.random), false)
+  assert.equal(ids.includes(T3), false)
+  assert.equal(ids.includes(T2), false, 'the Spaces lane is off')
   assert.ok(ids.includes(S.dm))
   assert.ok(ids.includes(T1))
-  const t1 = r.items.find((i) => i.id === T1)
-  assert.equal(t1.mentionsMe, true)
-  assert.equal(t1.direct, false)
-  assert.equal(t1.unread, true)
-  assert.equal(t1.where, 'Acme Team')
-  assert.match(t1.rev, /T1R1$|T1/)
-  const dm = r.items.find((i) => i.id === S.dm)
-  assert.equal(dm.direct, true)
-  assert.equal(dm.where, 'Direct message')
-  assert.equal(r.items.every((i) => i.level !== 'noise'), true)
-  assert.equal((await b.ctx.provided['inbox-feed'].items({ limit: 1 })).items.length, 1)
   await b.h.stop()
 })
 
-test('items signed out after a poll: state signedOut with the last cached items; a poll error: state error', async () => {
-  const b = await signedIn()
-  b.h.S.error = 'Google Chat is busy'
-  const e = await b.ctx.provided['inbox-feed'].items({})
-  assert.equal(e.state, 'error')
-  assert.match(e.message, /busy/)
-  assert.ok(e.items.length > 0, 'the cached items still come')
-  b.h.S.error = null
-  await b.ctx.sendPanel({ type: 'signOut' })
-  const r = await b.ctx.provided['inbox-feed'].items({})
+test('snapshot, not signed in: state signedOut with a message and no items; a hostile app (too old) says error', async () => {
+  const { ctx, h, google } = boot()
+  await h.ready
+  const r = await ctx.provided['inbox-feed'].snapshot()
   assert.equal(r.state, 'signedOut')
-  assert.ok(r.items.length > 0, 'the last items come with signedOut')
-  await b.h.stop()
+  assert.equal(typeof r.message, 'string')
+  assert.deepEqual(r.items, [])
+  assert.equal(google.calls.length, 0)
+  await h.stop()
+  const old = fakeCtx({ old: true, triage: fakeTriage() })
+  const h2 = host._start(old, { setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {} })
+  const r2 = await old.provided['inbox-feed'].snapshot()
+  assert.equal(r2.state, 'error')
+  assert.match(r2.message, /needs cc-cockpit/)
+  await h2.stop()
 })
 
-test('open and markRead refuse a bad id; a known id works; markRead writes through the existing path', async () => {
-  const b = await signedIn()
-  const svc = b.ctx.provided['inbox-feed']
-  for (const bad of [undefined, 7, '', 'nope', 'alert:Disk', 'spaces/ZZZ', `${S.team}/threads/NOPE`, { id: S.dm }]) {
-    await assert.rejects(() => svc.open(bad), /^Error: chat: /, String(bad))
-    await assert.rejects(() => svc.markRead(bad), /^Error: chat: /, String(bad))
-  }
-  assert.deepEqual(b.google.writes, [])
-  await svc.markRead(S.dm)
-  assert.equal(b.google.writes.length, 1)
-  assert.equal(b.h.S.marks[S.dm] === undefined || b.h.S.marks[S.dm].want === 'read', true)
-  await b.h.stop()
-})
-
-test('open runs what a row click runs: the conversation goes to the reviewer or the plain page', async () => {
-  const { fakeReviewer } = require('./fakes')
-  const reviewer = fakeReviewer()
-  const b = await signedIn({ reviewer })
-  await b.ctx.provided['inbox-feed'].open(T1)
-  assert.equal(reviewer.calls.length, 1)
-  assert.match(reviewer.calls[0].key, /./)
-  await b.h.stop()
-})
-
-test('recent: only read rows of the Recent lane, newest first, from the cache; unread items never appear', async () => {
-  const b = await signedIn()
-  const svc = b.ctx.provided['inbox-feed']
-  const before = b.google.calls.length
-  const r = await svc.recent({ limit: 50 })
-  assert.equal(b.google.calls.length, before, 'recent never calls Google')
-  assert.equal(r.state, 'ok')
-  assert.ok(r.asOf > 0)
-  assert.ok(r.items.length > 0, 'the fake world has read conversations')
-  assert.equal(r.items.every((i) => i.unread === false), true)
-  const unreadIds = (await svc.items({ limit: 50 })).items.map((i) => i.id)
-  assert.equal(r.items.some((i) => unreadIds.includes(i.id)), false)
-  assert.equal(r.items.some((i) => i.id === S.dm || i.id === T1), false)
-  assert.deepEqual(r.items.map((i) => i.at), [...r.items.map((i) => i.at)].sort((a, c) => c - a))
-  assert.deepEqual(r, structuredClone(r))
-  for (const k of ['id', 'rev', 'title', 'from', 'where', 'at', 'level', 'unread', 'direct', 'mentionsMe']) assert.ok(k in r.items[0], k)
-  assert.equal((await svc.recent({ limit: 1 })).items.length, 1)
-  assert.equal((await svc.recent({ limit: 0 })).items.length, 1)
-  assert.equal((await svc.recent({ limit: 999 })).items.length, r.items.length)
-  assert.equal((await svc.recent({ limit: 'junk' })).items.length, r.items.length)
-  assert.equal((await svc.recent()).items.length, r.items.length)
-  await assert.rejects(() => svc.recent('x'), /options are an object/)
-  await b.h.stop()
-})
-
-test('recent: a hidden Recent lane gives no items; signed out gives signedOut; a poll error gives error', async () => {
-  const hidden = await signedIn({ project: { lanes: { recent: false } } })
-  assert.deepEqual((await hidden.ctx.provided['inbox-feed'].recent({})).items, [])
-  assert.equal((await hidden.ctx.provided['inbox-feed'].recent({})).state, 'ok')
-  await hidden.h.stop()
-
-  const out = boot()
-  const r0 = await out.ctx.provided['inbox-feed'].recent({})
-  assert.equal(r0.state, 'signedOut')
-  assert.deepEqual(r0.items, [])
-  assert.equal(typeof r0.message, 'string')
-  await out.h.stop()
-
+test('snapshot, signed out after a poll: the last items come with signedOut; a failed poll gives error with them', async () => {
   const b = await signedIn()
   b.h.S.error = 'Google Chat is busy'
-  const e = await b.ctx.provided['inbox-feed'].recent({})
+  const e = await svcOf(b).snapshot()
   assert.equal(e.state, 'error')
   assert.match(e.message, /busy/)
   assert.ok(e.items.length > 0)
   b.h.S.error = null
   await b.ctx.sendPanel({ type: 'signOut' })
-  assert.equal((await b.ctx.provided['inbox-feed'].recent({})).state, 'signedOut')
+  const r = await svcOf(b).snapshot()
+  assert.equal(r.state, 'signedOut')
+  assert.ok(r.items.length > 0, 'the last items come with signedOut')
   await b.h.stop()
 })
 
-test('every id recent returns opens through open, as a row click does, and open marks nothing read', async () => {
-  const { fakeReviewer } = require('./fakes')
-  const reviewer = fakeReviewer()
-  const b = await signedIn({ reviewer })
-  const svc = b.ctx.provided['inbox-feed']
-  const r = await svc.recent({ limit: 50 })
-  assert.ok(r.items.length > 0)
-  for (const [n, it] of r.items.entries()) {
-    await svc.open(it.id)
-    assert.equal(reviewer.calls.length, n + 1, it.id)
+test('act refuses a foreign id, a bad argument and an action the item lacks; nothing reaches Google', async () => {
+  const b = await signedIn()
+  const svc = svcOf(b)
+  for (const [id, action] of [[undefined, 'open'], [7, 'open'], [S.dm, undefined], [S.dm, {}], ['', 'open'], ['nope', 'open'], ['alert:HighCPU', 'open'], ['spaces/ZZZ', 'open'], [`${S.team}/threads/NOPE`, 'markRead'], ['__proto__', 'open']]) {
+    const r = await svc.act(id, action)
+    assert.equal(r.ok, false, String(id))
+    assert.match(r.message, /^chat: /)
+    assert.ok(r.message.length <= 300)
   }
-  assert.deepEqual(b.google.writes, [], 'open writes nothing')
-  assert.equal(Object.keys(b.h.S.marks).length, 0, 'open marks nothing')
-  // Unknown ids stay refused, also after the widening.
-  await assert.rejects(() => svc.open('spaces/ZZZ'), /^Error: chat: /)
-  await b.h.stop()
-})
-
-test('markRead on a read (Recent) row is a harmless no-op for the feed', async () => {
-  const b = await signedIn()
-  const svc = b.ctx.provided['inbox-feed']
-  const id = (await svc.recent({})).items[0].id
-  await svc.markRead(id).catch(() => {}) // may refuse a row with no mark target; must not throw anything but chat: errors
-  assert.equal((await svc.recent({ limit: 50 })).items.every((i) => i.unread === false), true)
-  await b.h.stop()
-})
-
-test('markUnread: a read (Recent) row goes through the panel write, moves to items, changed is emitted', async () => {
-  const b = await signedIn()
-  const svc = b.ctx.provided['inbox-feed']
-  const id = (await svc.recent({ limit: 50 })).items.find((i) => !i.id.includes('/threads/')).id
-  const n = () => b.ctx.emitted.filter((e) => e.name === 'inbox-feed' && e.event === 'changed').length
-  const before = n()
-  const writes = b.google.writes.length
-  await svc.markUnread(id)
-  assert.equal(b.google.writes.length, writes + 1, 'one read-state write')
-  assert.ok(n() > before)
-  assert.ok((await svc.items({ limit: 50 })).items.some((i) => i.id === id) || b.h.S.marks[id].want === 'unread')
-  assert.ok(!(await svc.recent({ limit: 50 })).items.some((i) => i.id === id))
-  await b.h.stop()
-})
-
-test('markUnread: unknown ids and alert rows are refused as chat: errors, nothing written', async () => {
-  const b = await signedIn()
-  const svc = b.ctx.provided['inbox-feed']
-  for (const bad of [undefined, 7, '', 'nope', 'alert:Disk', 'spaces/ZZZ']) await assert.rejects(() => svc.markUnread(bad), /^Error: chat: /, String(bad))
+  // The action must be one of that item's: a read item has no markRead, an unread one no markUnread, a thread reply neither.
+  assert.equal((await svc.act(S.dm, 'markUnread')).ok, false)
+  assert.equal((await svc.act(S.random, 'markRead')).ok, false)
+  assert.equal((await svc.act(T3, 'markUnread')).ok, false)
+  assert.equal((await svc.act(S.dm, 'done')).ok, false)
+  assert.match((await svc.act(S.dm, 'x'.repeat(500))).message, /no action/)
   assert.deepEqual(b.google.writes, [])
   await b.h.stop()
 })
 
-test('markUnread: a thread row rejects with the panel\'s own message (Chat cannot change a thread\'s read state)', async () => {
+test('act markRead and markUnread: the panel\'s write path, one read-state write each, the item flips', async () => {
   const b = await signedIn()
-  const svc = b.ctx.provided['inbox-feed']
-  const t = (await svc.recent({ limit: 50 })).items.find((i) => i.id.includes('/threads/'))
-  if (t) await assert.rejects(() => svc.markUnread(t.id), /^Error: chat: .*thread/)
-  assert.deepEqual(b.google.writes, [])
+  const svc = svcOf(b)
+  assert.deepEqual(await svc.act(S.dm, 'markRead'), { ok: true })
+  assert.equal(b.google.writes.length, 1)
+  await settle(b)
+  const dm = () => svc.snapshot().then((r) => r.items.find((i) => i.id === S.dm))
+  assert.equal((await dm()).read, true)
+  assert.deepEqual((await dm()).actions.map((a) => a.id), ['open', 'markUnread'])
+  assert.deepEqual(await svc.act(S.dm, 'markUnread'), { ok: true })
+  assert.equal(b.google.writes.length, 2)
+  await settle(b)
+  assert.equal((await dm()).read, false)
   await b.h.stop()
 })
 
-test('markUnread: a failing write rejects as chat: and the row stays read', async () => {
+test('act markRead on a conversation of an alert group works: it is its own item', async () => {
+  const b = await signedIn()
+  assert.deepEqual(await svcOf(b).act(S.alerts, 'markRead'), { ok: true })
+  assert.equal(b.google.writes.length, 1)
+  await b.h.stop()
+})
+
+test('act: a Google refusal comes back as { ok: false, message } and the item stays unread', async () => {
   const fail = new Proxy({}, { get: (_, k) => (typeof k === 'string' && k.startsWith('patch:') ? 500 : undefined) })
   const b = await signedIn({ google: { fail } })
-  const svc = b.ctx.provided['inbox-feed']
-  const id = (await svc.recent({ limit: 50 })).items.find((i) => !i.id.includes('/threads/')).id
-  await assert.rejects(() => svc.markUnread(id), /^Error: chat: .*Could not mark/)
-  assert.ok((await svc.recent({ limit: 50 })).items.some((i) => i.id === id))
+  const r = await svcOf(b).act(S.dm, 'markRead')
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^chat: .*Could not mark/)
+  assert.equal((await svcOf(b).snapshot()).items.find((i) => i.id === S.dm).read, false)
   await b.h.stop()
 })
 
-test('changed is emitted after a poll and after a read change', async () => {
+test('act open: the conversation goes to the reviewer the way a row click does, and marks nothing read', async () => {
+  const reviewer = fakeReviewer()
+  const b = await signedIn({ reviewer })
+  const svc = svcOf(b)
+  for (const [n, id] of [T1, S.random, T3, S.alerts].entries()) {
+    assert.deepEqual(await svc.act(id, 'open'), { ok: true }, id)
+    assert.equal(reviewer.calls.length, n + 1, id)
+  }
+  assert.deepEqual(b.google.writes, [])
+  assert.equal(Object.keys(b.h.S.marks).length, 0)
+  await b.h.stop()
+})
+
+test('sync: after activate\'s first cached view (signed out here), carrying the state', async () => {
+  const { ctx, h } = boot()
+  await h.ready
+  await until(() => events({ ctx }, 'sync').length)
+  const [s] = events({ ctx }, 'sync')
+  assert.equal(s.data.state, 'signedOut')
+  assert.deepEqual(s.data.items, [])
+  assert.equal(typeof s.data.message, 'string')
+  assert.equal(events({ ctx }).length, 1, 'only the sync')
+  await h.stop()
+})
+
+test('sync after a sign-in, then items after a poll: the new list is one sync, then only diffs', async () => {
   const b = await signedIn()
-  const n = () => b.ctx.emitted.filter((e) => e.name === 'inbox-feed' && e.event === 'changed').length
-  assert.ok(n() >= 1, 'after the first poll')
-  assert.deepEqual(b.ctx.emitted.at(-1), { name: 'inbox-feed', event: 'changed', data: {} })
-  const afterPoll = n()
+  const syncs = events(b, 'sync')
+  assert.ok(syncs.length >= 1)
+  assert.equal(syncs.at(-1).data.state, 'ok')
+  // The sign-in is a sync (state ok, nothing known yet); the first poll's conversations follow as items.
+  const told = new Set(events(b, 'item').map((e) => e.data.id))
+  for (const id of [S.dm, T1, T2, T3, S.alerts, S.random]) assert.ok(told.has(id), id)
+  const total = b.ctx.emitted.length
   await b.h.pollNow('test', true)
-  assert.ok(n() > afterPoll, 'after another poll')
-  const beforeMark = n()
-  await b.ctx.sendPanel({ type: 'read', id: S.dm })
-  assert.ok(n() > beforeMark, 'after a read change')
+  assert.equal(b.ctx.emitted.length, total, 'a poll that changed nothing says nothing')
   await b.h.stop()
 })
 
-test('an app whose services have no useAll (before 0.9.7): still activates and provides', async () => {
+test('a mark emits an item with the new read state; a conversation leaving the scope is gone', async () => {
+  const b = await signedIn()
+  const n = b.ctx.emitted.length
+  await b.ctx.sendPanel({ type: 'read', id: S.dm })
+  await settle(b)
+  const items = b.ctx.emitted.slice(n).filter((e) => e.event === 'item' && e.data.id === S.dm)
+  assert.ok(items.length >= 1)
+  assert.equal(items.at(-1).data.read, true)
+  assert.deepEqual(items.at(-1).data.actions.map((a) => a.id), ['open', 'markUnread'])
+  // The Recent lane switched off: its conversations are gone at once.
+  const m = b.ctx.emitted.length
+  await b.ctx.changeSettings({ alertBots: ['Grafana'], lanes: { recent: false } })
+  await settle(b)
+  const gone = b.ctx.emitted.slice(m).filter((e) => e.event === 'gone').flatMap((e) => e.data.ids)
+  assert.ok(gone.includes(S.random))
+  assert.ok(gone.includes(T3))
+  await b.h.stop()
+})
+
+test('an error is a sync with state error, a different message another sync, its recovery a sync with ok', async () => {
+  const fail = {}
+  const b = await signedIn({ google: { fail } })
+  const syncs = () => events(b, 'sync')
+  const n0 = syncs().length
+  fail.spaces = 404
+  await b.h.pollNow('x', true)
+  assert.equal(syncs().length, n0 + 1)
+  const a = syncs().at(-1).data
+  assert.equal(a.state, 'error')
+  assert.ok(a.message.length > 0 && a.message.length <= 300)
+  assert.ok(a.items.length > 0, 'the last known list comes with the error')
+  // The same error again: nothing new to say.
+  await b.h.pollNow('x', true)
+  assert.equal(syncs().length, n0 + 1)
+  // Error A -> error B (the message changes, the kind does not): Inbox hears it.
+  fail.spaces = 400
+  await b.h.pollNow('x', true)
+  const last = syncs().at(-1).data
+  assert.equal(last.state, 'error')
+  assert.notEqual(last.message, a.message)
+  const n1 = syncs().length
+  assert.ok(n1 >= n0 + 2)
+  // Recovery.
+  delete fail.spaces
+  await b.h.pollNow('x', true)
+  assert.equal(syncs().length, n1 + 1)
+  assert.equal(syncs().at(-1).data.state, 'ok')
+  assert.equal(syncs().at(-1).data.message, undefined)
+  await b.h.stop()
+})
+
+test('a sign-out is a sync with signedOut and the last items; a new sign-in a sync with ok', async () => {
+  const b = await signedIn()
+  await b.ctx.sendPanel({ type: 'signOut' })
+  const out = events(b, 'sync').at(-1).data
+  assert.equal(out.state, 'signedOut')
+  assert.ok(out.items.length > 0)
+  await b.ctx.sendPanel({ type: 'signIn' })
+  await until(() => events(b, 'sync').at(-1).data.state === 'ok')
+  await settle(b)
+  assert.ok((await svcOf(b).snapshot()).items.length >= 5)
+  const told = new Set(events(b, 'item').map((e) => e.data.id))
+  assert.ok(told.has(S.dm))
+  await b.h.stop()
+})
+
+test('an app before 0.9.7 (services has no useAll, emit may be missing): still activates and provides; a throwing emit is harmless', async () => {
   const reg = tokens()
   const ctx = fakeCtx({ oauth: fakeOAuth(reg), triage: fakeTriage() })
   assert.equal('useAll' in ctx.services, false)
   const mod = require('../dist/host')
   mod.activate(ctx)
   assert.deepEqual(Object.keys(ctx.provided), ['inbox-feed'])
-  assert.equal((await ctx.provided['inbox-feed'].items({})).state, 'signedOut')
+  assert.equal((await ctx.provided['inbox-feed'].snapshot()).state, 'signedOut')
   await mod.deactivate()
+
+  const noEmit = fakeCtx({ oauth: fakeOAuth(tokens()), triage: fakeTriage() })
+  delete noEmit.services.emit
+  const h = host._start(noEmit, { setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {} })
+  await h.ready
+  assert.equal((await noEmit.provided['inbox-feed'].snapshot()).state, 'signedOut')
+  await h.stop()
+
+  const throwing = fakeCtx({ oauth: fakeOAuth(tokens()), triage: fakeTriage() })
+  throwing.services.emit = () => {
+    throw new Error('no listener')
+  }
+  const h2 = host._start(throwing, { setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {} })
+  await h2.ready
+  await new Promise((r) => setTimeout(r, 10))
+  assert.ok(throwing.logs.some((l) => /inbox-feed sync/.test(JSON.stringify(l))))
+  await h2.stop()
+})
+
+test('the panel state carries the scope line Inbox sees, for the footer', async () => {
+  const b = await signedIn({ project: { lanes: { spaces: false } } })
+  assert.equal(b.ctx.lastState().scope, 'unread mentions, direct messages and alerts + read of the last 2 days (newest 10)')
+  assert.equal(b.ctx.lastState().scope, (await svcOf(b).describe()).scope)
+  await b.h.stop()
 })

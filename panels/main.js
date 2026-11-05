@@ -260,7 +260,7 @@ function renderFooter() {
   const f = $('footer')
   f.replaceChildren()
   if (state.tooOld || !state.auth || !state.auth.signedIn) return
-  f.append(el('span', { text: `Changes nothing in Google Chat but your read state${state.markReadOnOpen ? ' (opening an unread row marks it read)' : ''}. ${state.account ? `Signed in as ${state.account}` : 'Signed in'}${state.auth.sessionOnly ? ' (until the app closes)' : ''}. ` }))
+  f.append(el('span', { text: `${state.scope ? `Inbox sees: ${state.scope}. ` : ''}Changes nothing in Google Chat but your read state${state.markReadOnOpen ? ' (opening an unread row marks it read)' : ''}. ${state.account ? `Signed in as ${state.account}` : 'Signed in'}${state.auth.sessionOnly ? ' (until the app closes)' : ''}. ` }))
   f.append(button('Sign out', () => post('signOut'), 'Deletes the stored Google sign-in of this project', 'link'))
 }
 

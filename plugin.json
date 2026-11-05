@@ -1,7 +1,7 @@
 {
   "id": "bronos.chat",
   "name": "Google Chat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "api": 1,
   "main": "dist/host.js",
   "description": "Your Google Chat in lanes (Mentions, Direct messages, Spaces, Alerts, Recent), sorted by Jev triage, a conversation opened as a clean page to discuss with Claude, Mark read / Mark unread. It changes nothing in Google Chat but your read state.",
@@ -37,7 +37,7 @@
           "lanes": {
             "type": "object",
             "title": "Lanes",
-            "description": "Which lanes to show. A hidden lane is never sent to triage. Alerts shows only with alert bots.",
+            "description": "Which lanes to show. A hidden lane is never sent to triage. Alerts shows only with alert bots. The Inbox plugin sees the unread conversations of the lanes that are on (Mentions, Direct messages, Spaces, Alerts) and the read ones of the Recent lane (days back and newest count below).",
             "additionalProperties": false,
             "properties": {
               "mentions": { "type": "boolean", "title": "Mentions (unread, @you by name)", "default": true },
@@ -141,7 +141,7 @@
   },
   "services": {
     "provides": {
-      "inbox-feed": 1
+      "inbox-feed": 2
     },
     "uses": {
       "triage": 1,

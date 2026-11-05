@@ -26,7 +26,7 @@ const noComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/
 
 test('the manifest: id, api, entry points and files exist, the services it uses', () => {
   assert.equal(manifest.id, 'bronos.chat')
-  assert.equal(manifest.version, '0.2.0')
+  assert.equal(manifest.version, '0.3.0')
   assert.equal(manifest.api, 1)
   assert.equal(manifest.license, 'MIT')
   assert.ok(fs.existsSync(path.join(ROOT, manifest.main)))
@@ -35,7 +35,7 @@ test('the manifest: id, api, entry points and files exist, the services it uses'
     assert.ok(fs.existsSync(path.join(ROOT, p.icon)))
   }
   assert.deepEqual(manifest.services.uses, { triage: 1, reviewer: 1 })
-  assert.deepEqual(manifest.services.provides, { 'inbox-feed': 1 })
+  assert.deepEqual(manifest.services.provides, { 'inbox-feed': 2 })
   assert.equal(manifest.contributes.cli[0].name, 'chat')
   assert.equal(manifest.contributes.cli[0].stdin, undefined, 'no subcommand reads stdin')
   for (const sub of ['status', 'refresh', 'list', 'show', 'read', 'unread', 'login', 'logout', 'client', 'help']) assert.match(manifest.contributes.cli[0].usage, new RegExp(`\\b${sub}\\b`))

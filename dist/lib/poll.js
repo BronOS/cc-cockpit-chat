@@ -340,6 +340,7 @@ function buildView(o) {
   const spOf = new Map(convs.map((x) => [x.c.id, x.sp]))
   const byLane = { mentions: [], direct: [], spaces: [], alerts: [], recent: [] }
   let rest = unreadOnes.map((x) => x.c)
+  const unreadById = new Map(rest.map((c) => [c.id, c]))
   const bots = cfg.alertBots || []
   if (alertsOn(cfg)) {
     const g = groupAlerts(rest, bots, titles)
@@ -391,6 +392,8 @@ function buildView(o) {
       space: sp,
     }
   }
+  // The inbox-feed has no groups: an alert group's conversations are items of their own (lib/feed.js).
+  for (const r of byLane.alerts) r.convRows = r.group.convIds.map((id) => unreadById.get(id)).filter(Boolean).map((c) => row(c, 'alerts'))
   for (const c of rest) byLane[unreadLane(c, mentioned(c, me) === 'me')].push(row(c, unreadLane(c, mentioned(c, me) === 'me')))
   // Recent: the newest read conversations of the last `recentDays`, alerts left out.
   const recent = readOnes

@@ -1,128 +1,175 @@
 'use strict'
-// The `inbox-feed` service (v1) for the Inbox plugin: the pure parts. The host (dist/host.js) wires
-// them to its view cache, the row open and the mark-read write.
+// The `inbox-feed` service (v2, 0.3.0) this plugin provides to Inbox: the pure parts. The host
+// (dist/host.js) wires them to its view, its open path and its mark-read write.
 //
-// - Only the rows of the Mentions and Direct messages lanes: what asks for the person. Spaces, Alerts
-//   and Recent stay in the panel (an Inbox full of channel chatter is not an inbox).
-// - Built from the rows the panel already shows (poll.buildView), so `items` never calls Google; the
-//   host keeps the last view of a signed-in run, so a signed-out or failing plugin still answers
-//   with what it had.
+// - Built only from the rows of the last view the panel shows (poll.buildView), never an API call:
+//   Inbox calls `snapshot()` whenever a provider joins and a service call has no rate limit from the
+//   app. The host keeps the last view of a signed-in run, so a signed-out or failing plugin still
+//   answers with what it had.
+// - The scope is the view itself: the unread conversations of every lane that is on (Mentions, Direct
+//   messages, Spaces, Alerts) and the read ones of the Recent lane (`recentDays`, `maxRecent`). An
+//   alert group is a panel idea; the feed has no groups, so the group's conversations are items
+//   labelled `alert` and `alert:<name>`. Triage verdicts stay in this plugin's lanes: the feed
+//   carries facts, and Inbox's rules decide what matters.
 // - `rev` is the latest message's resource name: it changes when a message arrives and for nothing
-//   else, which is what Inbox's "done until it changes" compares. A mark read leaves it alone.
-// - `level` is the plugin's own triage verdict (Jev or rules). Without a verdict (triage off, an
-//   error, not judged yet) a Mentions row is `action` (it names the person, the same floor triage
-//   applies) and a Direct messages row is `fyi`: unjudged is never urgent and never noise.
-// - `recent` (optional, announced through `features()`): the same FeedItems for the READ conversations
-//   of the Recent lane (read, within `recentDays`), newest first, so Inbox can offer "reopen what I
-//   just read". Same cache, same row mapping, same caps; never an API call. Every id it returns is a
-//   row of the view, so `open` accepts it exactly like a click on that row in the panel's Recent lane.
-// - Arguments come from another plugin, so they are checked here (as bronos.jira's service.js): the
-//   limit is clamped, an id must be a string of the Chat id shape and a row of the feed.
+//   else. A mark read leaves it alone.
+// - An action is a promise: `markRead` / `markUnread` are listed only on a row that has a mark target.
+//   A thread whose newest message is a reply is judged by the thread's own read time, which only Google
+//   Chat sets, so the panel's mark refuses it and the feed does not offer it (open still works).
+// - `diffFeed` is how events are made: after each poll and each mark the host compares the list with
+//   what it last told and emits `item` for any changed field and `gone` for a missing id.
+// - Plain data only (the registry copies it with structuredClone); every string is cut to the
+//   contract's caps here too, since Inbox treats a source as untrusted.
 
-const { rowId } = require('./util')
-const { RANK } = require('./lanes')
+const { cut, oneLine, sha } = require('./util')
 const { jiraKey } = require('./triage')
-
-const FEED_LANES = ['mentions', 'direct']
-const RECENT_LANE = 'recent'
-const LIMIT = { def: 20, min: 1, max: 50 }
-const LEVELS = ['urgent', 'action', 'fyi', 'noise']
-const ID_MAX = 300 // a space or thread resource name is far shorter; bounds what a caller can make us scan
-const CAPS = { title: 300, from: 120, where: 120 }
+const { alertsOn } = require('./settings')
 
 const DESCRIBE = Object.freeze({ label: 'Chat', badge: 'CHAT', color: 'green', kind: 'chat' })
-const FEATURES = Object.freeze(['markRead', 'recent', 'markUnread'])
+const FEATURES = Object.freeze([])
+const MAX_ITEMS = 1000
+const MAX_GONE = 500
+const MAX_ID = 200
+const MAX_REV = 100
+const CUTS = { title: 300, preview: 1000, name: 120, place: 120, label: 40, labels: 20, scope: 120, message: 300 }
+const ACTION_LABELS = { open: 'Open', markRead: 'Mark read', markUnread: 'Mark unread' }
 
-function clampLimit(v) {
-  if (v === undefined || v === null) return LIMIT.def
-  const n = Math.floor(Number(v))
-  if (!Number.isFinite(n)) return LIMIT.def
-  return Math.min(LIMIT.max, Math.max(LIMIT.min, n))
+/**
+ * `scope` of describe(): what the feed holds, from the settings. Each unread lane that is on is in
+ * it and one that is off is not; the Alerts lane exists only with alert bots (without them an alert
+ * message is a plain conversation of another lane), so it is named only then. The read part is the
+ * Recent lane.
+ */
+function scopeLine(cfg) {
+  const lanes = (cfg && cfg.lanes) || {}
+  const alerts = Boolean(cfg && cfg.alertBots && alertsOn(cfg))
+  const hasAlertsLane = Boolean(cfg && cfg.alertBots && cfg.alertBots.length)
+  const names = []
+  if (lanes.mentions !== false) names.push('mentions')
+  if (lanes.direct !== false) names.push('direct messages')
+  if (lanes.spaces !== false) names.push('spaces')
+  if (alerts) names.push('alerts')
+  // Every lane that can exist is on: say so in one phrase instead of listing them.
+  const every = names.length === 3 + (hasAlertsLane ? 1 : 0)
+  const parts = []
+  if (names.length) parts.push(every ? 'unread conversations' : `unread ${names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0]}`)
+  if (lanes.recent !== false) parts.push(`read of the last ${cfg.recentDays} days (newest ${cfg.maxRecent})`)
+  return cut(parts.length ? parts.join(' + ') : 'nothing (every lane is off)', CUTS.scope)
 }
 
-/** `items()`'s argument: `{ limit }` or nothing; anything else is a caller bug, refused. */
-function itemsOptions(o) {
-  if (o === undefined || o === null) return { limit: LIMIT.def }
-  if (typeof o !== 'object' || Array.isArray(o)) throw new Error('chat: the options are an object')
-  return { limit: clampLimit(o.limit) }
+/** `rev` in the contract's 1-100: a resource name longer than that is hashed (it still changes with a new message). */
+function revOf(id) {
+  const s = String(id == null ? '' : id)
+  if (!s) return 'none'
+  return s.length <= MAX_REV ? s : `h:${sha(s, 40)}`
 }
 
-/** A conversation id of a service argument (`spaces/<id>` or `spaces/<id>/threads/<id>`), or throws. */
-function checkId(value) {
-  if (typeof value !== 'string' || !value || value.length > ID_MAX) throw new Error('chat: not a conversation id')
-  const r = rowId(value)
-  // An alert id is a valid panel id but not a feed item.
-  if (!r || r.alert) throw new Error('chat: not a conversation id')
-  return value
-}
-
-/** The row's level: its verdict, else the fallback above. */
-function levelOf(row) {
-  const p = row.verdict && row.verdict.priority
-  if (LEVELS.includes(p)) return p
-  return row.lane === 'mentions' ? 'action' : 'fyi'
-}
-
-const cap = (s, n) => (typeof s === 'string' && s.length > n ? s.slice(0, n - 1) + '…' : String(s == null ? '' : s))
-
-/** One view row as a FeedItem. */
-function feedItem(row) {
+/**
+ * One conversation row of the view as a FeedItem.
+ * @param {object} row buildView's `conv` row
+ * @param {{ alerts?: string[] }} [o] `alerts`: the names of the alert groups the conversation is in
+ * @returns {object | null} null for a row whose id the contract cannot carry
+ */
+function feedItem(row, o = {}) {
   const c = row.conv
+  if (!c || typeof row.id !== 'string' || !row.id || row.id.length > MAX_ID) return null
+  const unread = Boolean(row.unread)
   const item = {
     id: row.id,
-    rev: c.latest.id,
-    title: cap(row.preview || row.title, CAPS.title),
-    from: cap(row.from, CAPS.from),
-    where: cap(row.where || row.title, CAPS.where),
-    at: row.at,
-    level: levelOf(row),
-    unread: Boolean(row.unread),
-    direct: c.kind === 'dm' || c.kind === 'group',
-    mentionsMe: row.mentioned === 'me',
+    rev: revOf(c.latest && c.latest.id),
+    title: cut(oneLine(row.title), CUTS.title) || '(no text)',
+    time: Math.max(1, Number(row.at) || 0),
+    read: !unread,
+    actions: [{ id: 'open', label: ACTION_LABELS.open }],
+  }
+  const preview = cut(oneLine(row.preview || ''), CUTS.preview)
+  if (preview) item.preview = preview
+  const name = cut(oneLine(row.from || ''), CUTS.name)
+  if (name) item.from = { name }
+  item.to = c.kind === 'dm' ? 'direct' : 'group'
+  if (row.mentioned === 'me') item.mentionsMe = true
+  const where = cut(oneLine(row.where || row.title || ''), CUTS.place)
+  if (where) item.place = { kind: 'channel', name: where }
+  const labels = []
+  if (row.mentioned === 'all') labels.push('mention:all')
+  if (o.alerts && o.alerts.length) {
+    labels.push('alert')
+    for (const a of o.alerts) labels.push(`alert:${a}`)
   }
   const key = jiraKey(c)
-  if (key) item.jiraKey = key
-  // A row with no mark target (a thread: its replies are judged by the thread's own read time, which
-  // only Google Chat sets) cannot be marked unread; say so, so a consumer hides the button instead of
-  // offering one that markUnread refuses (readstate.js NO_TARGET_TEXT). Absent means it can.
-  if (!row.target) item.canUnread = false
+  if (key) labels.push(`jira:${key}`)
+  const seen = new Set()
+  const clean = []
+  for (const l of labels) {
+    const s = cut(oneLine(l), CUTS.label)
+    if (s && !seen.has(s.toLowerCase())) {
+      seen.add(s.toLowerCase())
+      clean.push(s)
+    }
+  }
+  if (clean.length) item.labels = clean.slice(0, CUTS.labels)
+  if (row.target) item.actions.push(unread ? { id: 'markRead', label: ACTION_LABELS.markRead } : { id: 'markUnread', label: ACTION_LABELS.markUnread })
   return item
 }
 
-/** The feed rows of a view (Mentions and Direct messages, conversations only), lane by lane. */
+/** The rows of a view that are a feed item's source, lane by lane: conversations, and alert groups (expanded by feedItems). */
 function feedRows(view) {
-  return (view.lanes || []).filter((l) => FEED_LANES.includes(l.id)).flatMap((l) => l.rows.filter((r) => r.kind === 'conv' && r.conv))
+  return (view.lanes || []).flatMap((l) => l.rows.filter((r) => (r.kind === 'conv' && r.conv) || (r.kind === 'alert' && Array.isArray(r.convRows))))
 }
 
 /**
- * The Recent lane's conversations of a view. Read rows only: a conversation marked unread here
- * leaves the lane in buildView already, the filter is the belt to that brace. An empty array when the
- * lane is hidden (it is then not in `view.lanes`).
+ * The whole scope as items, newest first (then the id, a stable order), at most `limit` (default
+ * 1000, the contract's cap; `act` passes Infinity to check an id against everything). A
+ * conversation shows once, with the names of every alert group it is in.
+ * @param {object[]} rows feedRows(view)
+ * @param {{ limit?: number }} [o]
  */
-function recentRows(view) {
-  return (view.lanes || []).filter((l) => l.id === RECENT_LANE).flatMap((l) => l.rows.filter((r) => r.kind === 'conv' && r.conv && !r.unread))
+function feedItems(rows, o = {}) {
+  const convs = new Map() // id -> { row, alerts }
+  for (const r of rows) {
+    if (r.kind === 'alert') {
+      for (const cr of r.convRows) {
+        const e = convs.get(cr.id) || { row: cr, alerts: [] }
+        if (r.group && r.group.name && !e.alerts.includes(r.group.name)) e.alerts.push(r.group.name)
+        convs.set(cr.id, e)
+      }
+    } else if (!convs.has(r.id)) convs.set(r.id, { row: r, alerts: [] })
+  }
+  const items = []
+  for (const { row, alerts } of convs.values()) {
+    const it = feedItem(row, { alerts })
+    if (it) items.push(it)
+  }
+  const limit = o.limit === undefined ? MAX_ITEMS : o.limit
+  return items.sort((a, b) => b.time - a.time || (a.id < b.id ? -1 : 1)).slice(0, limit)
+}
+
+/** JSON with sorted keys: two items are the same when this is. */
+function stable(v) {
+  if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`
+  if (v && typeof v === 'object') return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable(v[k])}`).join(',')}}`
+  return JSON.stringify(v)
 }
 
 /**
- * The recently read items, newest message first (then the id, a stable order). No level ordering and
- * no noise rule: this is a history to reopen from, not a queue.
- * @param {object[]} rows view rows (recentRows)
- * @param {number} limit already clamped
+ * What changed between the list last told and the list now.
+ * @param {object[] | Map<string, object>} prev items last told
+ * @param {object[]} next items now
+ * @returns {{ items: object[], gone: string[] }} `items`: new or changed (any field), `gone`: ids missing now
  */
-function recentItems(rows, limit) {
-  return rows.map(feedItem).sort((a, b) => b.at - a.at || (a.id < b.id ? -1 : 1)).slice(0, limit)
+function diffFeed(prev, next) {
+  const before = prev instanceof Map ? prev : new Map((prev || []).map((i) => [i.id, i]))
+  const now = new Set(next.map((i) => i.id))
+  const items = next.filter((i) => !before.has(i.id) || stable(before.get(i.id)) !== stable(i))
+  const gone = [...before.keys()].filter((id) => !now.has(id))
+  return { items, gone }
 }
 
-/**
- * The items, best first: level, then the newest message, then the id (a stable order). Noise is
- * left out unless nothing else is there (design: the provider has nothing else), then it comes.
- * @param {object[]} rows view rows (feedRows)
- * @param {number} limit already clamped
- */
-function feedItems(rows, limit) {
-  const all = rows.map(feedItem).sort((a, b) => RANK[a.level] - RANK[b.level] || b.at - a.at || (a.id < b.id ? -1 : 1))
-  const kept = all.filter((i) => i.level !== 'noise')
-  return (kept.length ? kept : all).slice(0, limit)
+/** `gone` ids in the events' bound (1-500 per event). */
+function goneChunks(ids) {
+  const out = []
+  for (let i = 0; i < ids.length; i += MAX_GONE) out.push(ids.slice(i, i + MAX_GONE))
+  return out
 }
 
-module.exports = { DESCRIBE, FEATURES, FEED_LANES, LIMIT, itemsOptions, clampLimit, checkId, levelOf, feedItem, feedRows, feedItems, recentRows, recentItems }
+module.exports = { DESCRIBE, FEATURES, MAX_ITEMS, MAX_GONE, MAX_ID, CUTS, ACTION_LABELS, scopeLine, revOf, feedItem, feedRows, feedItems, diffFeed, goneChunks }
