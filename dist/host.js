@@ -55,6 +55,11 @@ const CHAT_PAGE = 50 // the view: a DM, group chat or flat space, its newest 50
 const PAGE_HTML_PART = 400000
 // How long the reviewer's prepare and cancel may take: host-local calls, far under this.
 const REVIEWER_WAIT_MS = 2000
+// ctx.overlay.start gives no "shown" signal: main's refusal (3 open, 10 a minute) rejects the handle's
+// `result` within one host-to-main round trip, while an overlay that opened settles only when it
+// closes. Our reader page counts as up once this long passed without a rejection (the bundled
+// reviewer's prepare and annotate wait the same).
+const OVERLAY_SETTLE_MS = 500
 // Most of a conversation's text Discuss with Claude sends from an overlay.
 const DISCUSS_MAX = 4000
 // Consumer Google accounts: Chat's API is for Workspace only (design "Workspace only").
@@ -689,7 +694,9 @@ function start(ctx, io = {}) {
     // Without the reviewer our own reader page is the overlay, so it is up before the conversation is
     // read (`ready: 'manual'`: its loader stays until the page has drawn the conversation).
     const early = pre || annotateOn() ? null : startReader(id, (viewKeyOf(id) || {}).title)
-    if (pre || early) shown()
+    // Our page counts once main did not refuse it (a refused one fails the open in plainReader).
+    if (pre) shown()
+    else if (early) void early.refusal.then((e) => e || shown())
     try {
       await showConversation(id, pre, early, shown)
     } finally {
@@ -758,6 +765,13 @@ function start(ctx, io = {}) {
     ctx.overlay.buttons('inbox-item', (info) => overlayButtons(info))
   }
 
+  /** Resolves null once an overlay is up (no refusal within OVERLAY_SETTLE_MS, or it already ended), else main's refusal. */
+  function overlayRefusal(handle) {
+    let timer
+    const wait = new Promise((resolve) => (timer = setTimeout(resolve, OVERLAY_SETTLE_MS, null)))
+    return Promise.race([handle.result.then(() => null, (e) => e || new Error('refused')), wait]).finally(() => clearTimeout(timer))
+  }
+
   /** `p`, or a rejection after `ms`: a service call has no timeout of its own. */
   function within(p, ms) {
     let timer
@@ -804,6 +818,14 @@ function start(ctx, io = {}) {
 
   async function showConversation(id, pre, early, shown = () => {}) {
     const t = await loadConversation(id)
+    // Marked read only once the conversation is on screen: annotate also resolves, with
+    // { opened: false }, when the person closed the loader during the read, and nothing is shown then
+    // (phase-1 review round 4).
+    const seen = () => {
+      shown()
+      markOnOpen(id)
+    }
+    const opened = (r) => !(r && r.opened === false)
     if (annotateOn()) {
       const pick = pickTab(await ctx.sessions.list().catch(() => []))
       const type = overlayType(id)
@@ -814,9 +836,9 @@ function start(ctx, io = {}) {
         const v = await conversationView(t, true)
         try {
           // Newest messages last: open at the end (reviewer `start`, app 0.9.4; an older one ignores it).
-          await reviewer.annotate({ ...base, start: 'end', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
-          shown()
-          return markOnOpen(id)
+          const r = await reviewer.annotate({ ...base, start: 'end', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
+          if (opened(r)) seen()
+          return
         } catch (e) {
           if (isMissingAnnotate(e)) noAnnotate()
           else {
@@ -827,14 +849,14 @@ function start(ctx, io = {}) {
       }
       if (!S.annotateMissing) {
         try {
-          await reviewer.annotate({ ...base, text: cut(textOf(t), 400000) })
+          const r = await reviewer.annotate({ ...base, text: cut(textOf(t), 400000) })
           if (htmlError) {
             S.htmlRejected = htmlError
             ctx.log.info('reviewer.annotate takes text only: using text for this run')
             postState()
           }
-          shown()
-          return markOnOpen(id)
+          if (opened(r)) seen()
+          return
         } catch (e) {
           if (!isMissingAnnotate(e)) return setNotice(`The reviewer could not open the conversation: ${e.message}${htmlError && htmlError !== e.message ? ` (html: ${htmlError})` : ''}`, 'error')
           noAnnotate()
@@ -843,7 +865,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(id, t, await conversationView(t, false), early, shown)
+    await plainReader(id, t, await conversationView(t, false), early, shown, seen)
   }
 
   function noAnnotate() {
@@ -852,13 +874,20 @@ function start(ctx, io = {}) {
     postState()
   }
 
-  /** Starts the reader page's overlay (before the conversation is read when it can); null when the app refuses. */
+  /**
+   * Starts the reader page's overlay (before the conversation is read when it can); null when start
+   * throws. `refusal` resolves null once the page is up (OVERLAY_SETTLE_MS without a rejection, or the
+   * person closed it), else main's refusal; `ended` turns true once the overlay ended.
+   */
   function startReader(id, title) {
     const type = overlayType(id)
     try {
       const handle = ctx.overlay.start({ kind: 'html', file: 'panels/thread.html', title: cut(oneLine(title || ''), 100) || 'Google Chat', size: 'large', ready: 'manual', ...(type ? { type } : {}) })
       if (type && typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(id))
-      return { handle, used: false }
+      const started = { handle, used: false, ended: false, refusal: overlayRefusal(handle) }
+      const end = () => (started.ended = true)
+      handle.result.then(end, end)
+      return started
     } catch (e) {
       setNotice(`Cannot open the reader: ${e.message}`, 'error')
       return null
@@ -870,26 +899,33 @@ function start(ctx, io = {}) {
    * same HTML in parts, then one message per image, so no message passes the page limit. A link click
    * in the page comes back as `{ open }` and opens only a link this host put into the document.
    */
-  async function plainReader(id, t, v, early, shown = () => {}) {
+  async function plainReader(id, t, v, early, shown = () => {}, seen = shown) {
     const started = early || startReader(id, t.title)
     if (!started) return
     started.used = true
+    // start() returns a handle even for an overlay main refuses; the refusal only rejects `result`.
+    const refused = await started.refusal
+    if (refused) return setNotice(`Cannot open the reader: ${refused.message}`, 'error')
     // On screen now; the wait below lasts until the person closes the page (feed act answers here).
     shown()
     const handle = started.handle
     const parts = []
     for (let i = 0; i < v.html.length; i += PAGE_HTML_PART) parts.push(v.html.slice(i, i + PAGE_HTML_PART))
+    let posted = false
     try {
       handle.post({ type: 'doc', title: t.title, parts: parts.length, assets: v.assets.length })
       parts.forEach((part, i) => handle.post({ type: 'html', i, part }))
       for (const a of v.assets) handle.post({ type: 'asset', id: a.id, dataUrl: a.dataUrl })
+      posted = true
     } catch (e) {
       ctx.log.warn(`posting to the reader: ${e.message}`)
       // ready: 'manual' means the page never draws, so never says ready, and the loader would stay.
       setNotice(`Cannot show the conversation: ${e.message}`, 'error')
       try { handle.close?.() } catch {}
     }
-    markOnOpen(id)
+    // Read only when the conversation reached a page still open: a post after the person closed the
+    // loader is a silent no-op, so they never saw it.
+    if (posted && !started.ended) seen()
     // The links the page may ask to open: the ones this host put into the document (http(s) only,
     // normalised by URL as the page's a.href is). The guide's rule for ctx.openExternal: a URL the
     // host chose, never one taken from the page as is.

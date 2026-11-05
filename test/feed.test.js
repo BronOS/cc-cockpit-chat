@@ -430,6 +430,66 @@ test('act open: the app refusing our reader page is the act\'s refusal, with the
   await b.h.stop()
 })
 
+// Round-4 review: main never throws from start(); its refusal (3 open, 10 a minute) rejects the
+// handle's result a moment later, and act answered ok for a reader page that never opened. And
+// markOnOpen ran after any annotate that resolved, also the { opened: false } of a closed loader.
+test('act open: a reader page whose result rejects (main refused it) is the act\'s refusal, and nothing is marked read', async () => {
+  const b = await signedIn({ project: { markReadOnOpen: true } })
+  const start = b.ctx.overlay.start
+  b.ctx.overlay.start = (spec) => {
+    const h = start(spec)
+    const result = Promise.reject(new Error('overlay: bronos.chat already has 3 overlays open'))
+    result.catch(() => {})
+    return { ...h, result }
+  }
+  const r = await svcOf(b).act(S.dm, 'open')
+  assert.equal(r.ok, false)
+  assert.match(r.message, /^chat: Cannot open the reader: overlay: bronos\.chat already has 3 overlays open/)
+  await settle(b)
+  assert.deepEqual(b.google.writes, [], 'a conversation never shown stays unread')
+  await b.h.stop()
+})
+
+test('act open: the loader the person closed (annotate { opened: false }) marks nothing read; a shown one does', async () => {
+  let answer = { opened: false }
+  const reviewer = {
+    calls: [],
+    prepare: async () => ({ opened: true }),
+    cancel: async () => ({ closed: false }),
+    async annotate(a) {
+      reviewer.calls.push(a)
+      return answer
+    },
+  }
+  const b = await signedIn({ reviewer, project: { markReadOnOpen: true } })
+  // The prepared loader was up, so act answers ok; the person closed it while the conversation loaded.
+  assert.deepEqual(await svcOf(b).act(S.dm, 'open'), { ok: true })
+  await until(() => reviewer.calls.length === 1)
+  await settle(b)
+  assert.deepEqual(b.google.writes, [], 'a conversation never shown stays unread')
+  answer = { opened: true }
+  assert.deepEqual(await svcOf(b).act(S.dm, 'open'), { ok: true })
+  await until(() => b.google.writes.length === 1)
+  assert.deepEqual(b.google.writes.map((w) => w.space), [S.dm])
+  await b.h.stop()
+})
+
+test('markReadOnOpen: our reader page closed before the conversation reached it marks nothing read', async () => {
+  const b = await signedIn({ project: { markReadOnOpen: true } })
+  // The fake page ends at once (dismissed): the person closed the loader during the read.
+  await b.ctx.sendPanel({ type: 'open', id: S.dm })
+  await settle(b)
+  assert.ok(b.ctx.overlays.length >= 1)
+  assert.deepEqual(b.google.writes, [])
+  // A page that stays open gets the conversation: marked read.
+  const start = b.ctx.overlay.start
+  b.ctx.overlay.start = (spec) => ({ ...start(spec), result: new Promise(() => {}) })
+  assert.deepEqual(await svcOf(b).act(S.dm, 'open'), { ok: true })
+  await until(() => b.google.writes.length === 1)
+  assert.deepEqual(b.google.writes.map((w) => w.space), [S.dm])
+  await b.h.stop()
+})
+
 test('sync: after activate\'s first cached view (signed out here), carrying the state', async () => {
   const { ctx, h } = boot()
   await h.ready
