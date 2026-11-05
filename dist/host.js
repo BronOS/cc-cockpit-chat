@@ -60,6 +60,11 @@ const REVIEWER_WAIT_MS = 2000
 // closes. Our reader page counts as up once this long passed without a rejection (the bundled
 // reviewer's prepare and annotate wait the same).
 const OVERLAY_SETTLE_MS = 500
+// The plugin that opens our items' overlays besides us: the bundled reviewer our prepare and annotate
+// go to. ctx.services cannot name the provider a project picked, and a `cockpit.*` id loads only from
+// the app's own bundle, so this one id is what an `inbox-item` overlay's opener may be beside our own
+// (a replacement reviewer's overlays show no item buttons).
+const REVIEWER_ID = 'cockpit.reviewer'
 // Most of a conversation's text Discuss with Claude sends from an overlay.
 const DISCUSS_MAX = 4000
 // Consumer Google accounts: Chat's API is for Workspace only (design "Workspace only").
@@ -727,9 +732,19 @@ function start(ctx, io = {}) {
    * overlay gets no buttons, as `act` refuses it.
    */
   function ownItem(info) {
-    const d = info && info.type && info.type.data
+    if (!info || !trustedOpener(info.opener)) return null
+    const d = info.type && info.type.data
     if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
     return feedItemOf(d.id)
+  }
+
+  /**
+   * Whether an overlay's opener may get our item buttons: we (the reader page) or the reviewer we hand
+   * the item to. `opener` is the app's record of who opened it (OverlayInfo), unlike `data`: another
+   * plugin opening an overlay that names one of our conversations gets none of our item buttons.
+   */
+  function trustedOpener(opener) {
+    return opener === ctx.pluginId || opener === REVIEWER_ID
   }
 
   /**
