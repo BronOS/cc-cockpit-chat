@@ -118,7 +118,8 @@ changes (an error, a recovery, a different error message). Inbox can open a conv
 as a click on its row) and mark it read or unread (the same write as Mark read). The panel's footer
 shows the scope line Inbox sees. Nothing leaves your machine: the data goes to another plugin of the
 same project. Inbox 0.2.0 reads v2; an older Inbox (v1) no longer gets Chat from this version.
-Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
+Providing needs no newer app; Inbox 0.2.0 reading it needs cc-cockpit 0.10.0, and the toolbar buttons below
+need an app with `ctx.overlay.buttons` (0.10).
 
 **Conversation overlays.** A conversation opens with the overlay type `inbox-item { source: "bronos.chat", id }`
 (the reviewer gets it in `prepare` and `annotate`; our own reader page starts at once with
