@@ -670,6 +670,13 @@ function start(ctx, io = {}) {
     return readableText({ title: t.title, where: t.where, messages: t.messages, note: t.note, senderOf: t.senderOf, isUnread: t.isUnread, nameOf: t.nameOf, me: me() })
   }
 
+  /** Close an overlay handle that is not needed; a throw here must not mask the error it runs beside. */
+  function closeQuietly(handle) {
+    try {
+      handle.close?.()
+    } catch {}
+  }
+
   /**
    * Open: the conversation as clean HTML with its pictures in the reviewer, else as plain text in the
    * reviewer (a reviewer whose annotate takes text only), else in our own page. The chain, each step
@@ -701,7 +708,7 @@ function start(ctx, io = {}) {
       await showConversation(id, pre, early, shown)
     } finally {
       if (pre) await cancelView(pre)
-      if (early && !early.used) early.handle.close()
+      if (early && !early.used) closeQuietly(early.handle)
     }
   }
 
@@ -748,7 +755,7 @@ function start(ctx, io = {}) {
    * of the text is the newest); the feed's preview when the read fails.
    */
   async function overlayDiscuss(id) {
-    const item = feedList(Infinity).find((i) => i.id === id)
+    const item = feedItemOf(id)
     if (!item) return null
     try {
       const t = await loadConversation(id)
@@ -921,7 +928,7 @@ function start(ctx, io = {}) {
       ctx.log.warn(`posting to the reader: ${e.message}`)
       // ready: 'manual' means the page never draws, so never says ready, and the loader would stay.
       setNotice(`Cannot show the conversation: ${e.message}`, 'error')
-      try { handle.close?.() } catch {}
+      closeQuietly(handle)
     }
     // Read only when the conversation reached a page still open: a post after the person closed the
     // loader is a silent no-op, so they never saw it.
