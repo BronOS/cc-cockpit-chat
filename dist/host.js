@@ -677,11 +677,12 @@ function start(ctx, io = {}) {
    * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
    * read, our own reader page) closes it in the finally.
    */
-  async function openConversation(id) {
+  async function openConversation(id, onStarted) {
     const pre = await prepareView(id)
     // Without the reviewer our own reader page is the overlay, so it is up before the conversation is
     // read (`ready: 'manual'`: its loader stays until the page has drawn the conversation).
     const early = pre || annotateOn() ? null : startReader(id, (viewKeyOf(id) || {}).title)
+    if (onStarted) onStarted()
     try {
       await showConversation(id, pre, early)
     } finally {
@@ -707,7 +708,7 @@ function start(ctx, io = {}) {
   function ownItem(info) {
     const d = info && info.type && info.type.data
     if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
-    return feedList(Infinity).find((i) => i.id === d.id) || null
+    return feedItemOf(d.id)
   }
 
   /**
@@ -1209,6 +1210,14 @@ function start(ctx, io = {}) {
     return feed.feedItems(S.feedRows, { limit })
   }
 
+  /**
+   * One feed item by id, or null: the same item feedList(Infinity) holds, without building and
+   * sorting every other one (main asks the overlay buttons after every click and setButtons).
+   */
+  function feedItemOf(id) {
+    return feed.feedItems(S.feedRows, { limit: Infinity, only: id })[0] || null
+  }
+
   /** `ok`, `signedOut` or `error`, with the message the Sync carries. */
   function feedState() {
     if (tooOld) return { state: 'error', message: cut(oneLine(tooOld), 300) }
@@ -1263,16 +1272,39 @@ function start(ctx, io = {}) {
     feedEmit('sync', feedSync())
   })
 
+  /**
+   * `act(id, 'open')` of the feed: resolves once the open has started (the reviewer's overlay
+   * prepared, or our own reader page up), not when it is over. The rest (reading the conversation, the
+   * annotate, and without the reviewer the wait for our reader page to close) runs on: Inbox gives
+   * every act 10 s, and an open that waited for all that was reported as failed while it was on
+   * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
+   * after the start goes to this panel's notice; one before it is the act's refusal.
+   */
+  function openStarted(open) {
+    return new Promise((resolve, reject) => {
+      let started = false
+      open(() => {
+        started = true
+        resolve()
+      }).then(resolve, (e) => {
+        if (!started) return reject(e)
+        const msg = e && e.message ? e.message : String(e)
+        ctx.log.warn(`open: ${msg}`)
+        setNotice(`Could not open the conversation: ${msg}`, 'error')
+      })
+    })
+  }
+
   /** One of the item's own actions, as a row click or the panel's mark does it. Never rejects. */
   async function feedAct(id, action) {
     await ready
     const refuse = (message) => ({ ok: false, message: cut(oneLine(message), 300) })
     if (typeof id !== 'string' || typeof action !== 'string') return refuse('chat: act takes an item id and an action id')
-    const item = feedList(Infinity).find((i) => i.id === id)
+    const item = feedItemOf(id)
     if (!item) return refuse('chat: that conversation is not in the inbox feed (refresh?)')
     if (!item.actions.some((a) => a.id === action)) return refuse(`chat: this conversation has no action "${cut(action, 40)}"`)
     try {
-      if (action === 'open') await openConversation(id)
+      if (action === 'open') await openStarted((started) => openConversation(id, started))
       else {
         const r = await markRow(id, action === 'markUnread' ? 'unread' : 'read', { quiet: true })
         if (r.error) return refuse(`chat: ${r.error}`)

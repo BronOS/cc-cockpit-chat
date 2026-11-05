@@ -110,6 +110,9 @@ test('feedRows and feedItems: every lane, an alert group as one item per convers
   assert.equal(items[2].read, true)
   assert.equal(feed.feedItems(rows, { limit: 2 }).length, 2)
   assert.equal(feed.feedItems(rows, { limit: Infinity }).length, 5)
+  // `only`: the same item as in the whole list (both alert names kept), nothing else built.
+  assert.deepEqual(feed.feedItems(rows, { only: 'spaces/AL' }), [items[0]])
+  assert.deepEqual(feed.feedItems(rows, { only: 'spaces/NOPE' }), [])
   // A stable order for equal times: the id.
   const tie = feed.feedItems([vrow('spaces/B', { at: 1 }), vrow('spaces/A', { at: 1 })])
   assert.deepEqual(tie.map((i) => i.id), ['spaces/A', 'spaces/B'])
@@ -345,10 +348,23 @@ test('act open: the conversation goes to the reviewer the way a row click does, 
   const svc = svcOf(b)
   for (const [n, id] of [T1, S.random, T3, S.alerts].entries()) {
     assert.deepEqual(await svc.act(id, 'open'), { ok: true }, id)
-    assert.equal(reviewer.calls.length, n + 1, id)
+    // act answers once the open has started: the read and the annotate go on after it.
+    await until(() => reviewer.calls.length === n + 1)
   }
   assert.deepEqual(b.google.writes, [])
   assert.equal(Object.keys(b.h.S.marks).length, 0)
+  await b.h.stop()
+})
+
+test('act open settles once the reader is up, not when the person closes it (no reviewer)', async () => {
+  const b = await signedIn()
+  // Our own reader page stays open (its result never settles), as it does until the person closes it.
+  const start = b.ctx.overlay.start
+  b.ctx.overlay.start = (spec) => ({ ...start(spec), result: new Promise(() => {}) })
+  const before = b.ctx.overlays.length
+  const late = new Promise((r) => setTimeout(() => r('late'), 1000))
+  assert.deepEqual(await Promise.race([svcOf(b).act(S.dm, 'open'), late]), { ok: true })
+  assert.ok(b.ctx.overlays.length > before)
   await b.h.stop()
 })
 

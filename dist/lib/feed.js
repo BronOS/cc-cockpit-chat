@@ -126,14 +126,17 @@ function feedRows(view) {
  */
 function feedItems(rows, o = {}) {
   const convs = new Map() // id -> { row, alerts }
+  // `only`: the one id wanted (an overlay's buttons, an act): every other conversation is skipped.
+  const wanted = (id) => o.only === undefined || id === o.only
   for (const r of rows) {
     if (r.kind === 'alert') {
       for (const cr of r.convRows) {
+        if (!wanted(cr.id)) continue
         const e = convs.get(cr.id) || { row: cr, alerts: [] }
         if (r.group && r.group.name && !e.alerts.includes(r.group.name)) e.alerts.push(r.group.name)
         convs.set(cr.id, e)
       }
-    } else if (!convs.has(r.id)) convs.set(r.id, { row: r, alerts: [] })
+    } else if (wanted(r.id) && !convs.has(r.id)) convs.set(r.id, { row: r, alerts: [] })
   }
   const items = []
   for (const { row, alerts } of convs.values()) {
