@@ -815,6 +815,7 @@ function start(ctx, io = {}) {
         try {
           // Newest messages last: open at the end (reviewer `start`, app 0.9.4; an older one ignores it).
           await reviewer.annotate({ ...base, start: 'end', html: v.html, ...(v.aside ? { aside: v.aside } : {}), ...(v.assets.length ? { assets: v.assets } : {}) })
+          shown()
           return markOnOpen(id)
         } catch (e) {
           if (isMissingAnnotate(e)) noAnnotate()
@@ -832,6 +833,7 @@ function start(ctx, io = {}) {
             ctx.log.info('reviewer.annotate takes text only: using text for this run')
             postState()
           }
+          shown()
           return markOnOpen(id)
         } catch (e) {
           if (!isMissingAnnotate(e)) return setNotice(`The reviewer could not open the conversation: ${e.message}${htmlError && htmlError !== e.message ? ` (html: ${htmlError})` : ''}`, 'error')
@@ -1290,14 +1292,23 @@ function start(ctx, io = {}) {
    * every act 10 s, and an open that waited for all that was reported as failed while it was on
    * screen (design-next §3.4: "a source answering act(id, 'open') by opening first"). A failure
    * after the start goes to this panel's notice; one before it is the act's refusal.
+   * An open that ends without anything shown (the reviewer refused the conversation, the app refused
+   * our reader page: paths that set the panel's notice and return) is a refusal too, with that
+   * notice's text: resolving there answered ok for nothing on screen, and Inbox ended the item's
+   * "back" mark (phase-1 review round 3). One guard here, not one per early return.
    */
   function openStarted(open) {
     return new Promise((resolve, reject) => {
       let started = false
+      const before = S.notice
       open(() => {
         started = true
         resolve()
-      }).then(resolve, (e) => {
+      }).then(() => {
+        if (started) return
+        const n = S.notice !== before && S.notice && S.notice.kind === 'error' ? S.notice.text : ''
+        reject(new Error(n || 'the conversation could not be shown'))
+      }, (e) => {
         if (!started) return reject(e)
         const msg = e && e.message ? e.message : String(e)
         ctx.log.warn(`open: ${msg}`)
