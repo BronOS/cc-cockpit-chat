@@ -55,6 +55,8 @@ const CHAT_PAGE = 50 // the view: a DM, group chat or flat space, its newest 50
 const PAGE_HTML_PART = 400000
 // How long the reviewer's prepare and cancel may take: host-local calls, far under this.
 const REVIEWER_WAIT_MS = 2000
+// Most of a conversation's text Discuss with Claude sends from an overlay.
+const DISCUSS_MAX = 4000
 // Consumer Google accounts: Chat's API is for Workspace only (design "Workspace only").
 const PERSONAL_DOMAINS = new Set(['gmail.com', 'googlemail.com'])
 
@@ -677,11 +679,75 @@ function start(ctx, io = {}) {
    */
   async function openConversation(id) {
     const pre = await prepareView(id)
+    // Without the reviewer our own reader page is the overlay, so it is up before the conversation is
+    // read (`ready: 'manual'`: its loader stays until the page has drawn the conversation).
+    const early = pre || annotateOn() ? null : startReader(id, (viewKeyOf(id) || {}).title)
     try {
-      await showConversation(id, pre)
+      await showConversation(id, pre, early)
     } finally {
       if (pre) await cancelView(pre)
+      if (early && !early.used) early.handle.close()
     }
+  }
+
+  /**
+   * The `inbox-item` type of a conversation overlay (Inbox's and the buttons' key), or none for an
+   * alert group row (it shows several conversations and is no feed item).
+   */
+  function overlayType(id) {
+    const which = rowId(id)
+    return which && !which.alert ? { name: 'inbox-item', data: { source: ctx.pluginId, id } } : null
+  }
+
+  /**
+   * The feed item an `inbox-item` overlay of ours names, or null (the data came from the opener: check it).
+   * Only a conversation still in the feed counts: one that left it is no item Inbox shows, so its
+   * overlay gets no buttons, as `act` refuses it.
+   */
+  function ownItem(info) {
+    const d = info && info.type && info.type.data
+    if (!d || typeof d !== 'object' || d.source !== ctx.pluginId || typeof d.id !== 'string') return null
+    return feedList(Infinity).find((i) => i.id === d.id) || null
+  }
+
+  /**
+   * The item's actions but open, with `run` = the same code as the feed's `act`; labels follow the item's state.
+   * A refused act goes to the panel's notice and is thrown: the app only logs a run that throws, and
+   * an answer it does not read would make a failed Mark read silent.
+   */
+  function overlayButtons(info) {
+    const item = ownItem(info)
+    if (!item) return []
+    const run = async (action) => {
+      const r = await feedAct(item.id, action)
+      if (r && r.ok === false) {
+        setNotice(r.message, 'error')
+        throw new Error(r.message)
+      }
+    }
+    return item.actions.filter((a) => a.id !== 'open').map((a) => ({ id: a.id, label: a.label, run: () => run(a.id) }))
+  }
+
+  /**
+   * What Discuss with Claude sends for a conversation overlay: its latest messages, capped (the end
+   * of the text is the newest); the feed's preview when the read fails.
+   */
+  async function overlayDiscuss(id) {
+    const item = feedList(Infinity).find((i) => i.id === id)
+    if (!item) return null
+    try {
+      const t = await loadConversation(id)
+      const text = textOf(t)
+      return { text: `Conversation: ${item.title}\n${text.length > DISCUSS_MAX ? text.slice(-DISCUSS_MAX) : text}` }
+    } catch (e) {
+      ctx.log.warn(`discuss text of ${id}: ${e && e.message ? e.message : e}`)
+      return { text: cut([`Conversation: ${item.title}`, item.preview || ''].filter(Boolean).join('\n'), DISCUSS_MAX) }
+    }
+  }
+
+  if (ctx.overlay && typeof ctx.overlay.buttons === 'function') {
+    // Dropped by the app when the plugin stops.
+    ctx.overlay.buttons('inbox-item', (info) => overlayButtons(info))
   }
 
   /** `p`, or a rejection after `ms`: a service call has no timeout of its own. */
@@ -713,7 +779,10 @@ function start(ctx, io = {}) {
     const v = viewKeyOf(id)
     if (!v) return null
     try {
-      await within(reviewer.prepare({ key: v.key, title: cut(oneLine(v.title), 200) || '(no text)' }), REVIEWER_WAIT_MS)
+      // The type goes with prepare: the reviewer fixes an overlay's type when it starts, so the
+      // annotate that fills a prepared overlay cannot add it later (an older reviewer ignores it).
+      const type = overlayType(id)
+      await within(reviewer.prepare({ key: v.key, title: cut(oneLine(v.title), 200) || '(no text)', ...(type ? { type } : {}) }), REVIEWER_WAIT_MS)
       return { key: v.key }
     } catch {
       return null
@@ -725,11 +794,13 @@ function start(ctx, io = {}) {
     await within(reviewer.cancel({ key: pre.key }), REVIEWER_WAIT_MS).catch((e) => ctx.log.warn(`reviewer.cancel: ${e && e.message ? e.message : e}`))
   }
 
-  async function showConversation(id, pre) {
+  async function showConversation(id, pre, early) {
     const t = await loadConversation(id)
     if (annotateOn()) {
       const pick = pickTab(await ctx.sessions.list().catch(() => []))
-      const base = { title: cut(oneLine(t.title), 200) || '(no text)', key: t.key, ...(pick.tabId ? { tabId: pick.tabId } : {}) }
+      const type = overlayType(id)
+      // An older reviewer ignores `type`.
+      const base = { title: cut(oneLine(t.title), 200) || '(no text)', key: t.key, ...(pick.tabId ? { tabId: pick.tabId } : {}), ...(type ? { type } : {}) }
       let htmlError = null
       if (!S.htmlRejected) {
         const v = await conversationView(t, true)
@@ -762,7 +833,7 @@ function start(ctx, io = {}) {
     }
     // Our own page instead of the reviewer's: its loader goes first (it cannot show this page).
     if (pre) await cancelView(pre)
-    await plainReader(id, t, await conversationView(t, false))
+    await plainReader(id, t, await conversationView(t, false), early)
   }
 
   function noAnnotate() {
@@ -776,13 +847,24 @@ function start(ctx, io = {}) {
    * same HTML in parts, then one message per image, so no message passes the page limit. A link click
    * in the page comes back as `{ open }` and opens only a link this host put into the document.
    */
-  async function plainReader(id, t, v) {
-    let handle
+  /** Starts the reader page's overlay (before the conversation is read when it can); null when the app refuses. */
+  function startReader(id, title) {
+    const type = overlayType(id)
     try {
-      handle = ctx.overlay.start({ kind: 'html', file: 'panels/thread.html', title: cut(oneLine(t.title), 100) || 'Google Chat', size: 'large' })
+      const handle = ctx.overlay.start({ kind: 'html', file: 'panels/thread.html', title: cut(oneLine(title || ''), 100) || 'Google Chat', size: 'large', ready: 'manual', ...(type ? { type } : {}) })
+      if (type && typeof handle.onDiscuss === 'function') handle.onDiscuss(() => overlayDiscuss(id))
+      return { handle, used: false }
     } catch (e) {
-      return setNotice(`Cannot open the reader: ${e.message}`, 'error')
+      setNotice(`Cannot open the reader: ${e.message}`, 'error')
+      return null
     }
+  }
+
+  async function plainReader(id, t, v, early) {
+    const started = early || startReader(id, t.title)
+    if (!started) return
+    started.used = true
+    const handle = started.handle
     const parts = []
     for (let i = 0; i < v.html.length; i += PAGE_HTML_PART) parts.push(v.html.slice(i, i + PAGE_HTML_PART))
     try {

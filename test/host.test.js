@@ -23,6 +23,7 @@ function boot(opts = {}) {
     reviewer: opts.reviewer,
     sessions: opts.sessions,
     overlayAnswer: opts.overlayAnswer,
+    buttons: !opts.noButtons,
     storage: opts.storage,
     secrets: opts.secrets,
     dataDir: opts.dataDir,
@@ -319,7 +320,7 @@ test('open with a reviewer that has prepare: the overlay is up before anything i
   const before = reads()
   await ctx.sendPanel({ type: 'open', id: S.dm })
   await settle({ h })
-  assert.deepEqual(order[0], ['prepare', { key: `chat:${S.dm}`, title: 'Ann Example' }, before])
+  assert.deepEqual(order[0], ['prepare', { key: `chat:${S.dm}`, title: 'Ann Example', type: { name: 'inbox-item', data: { source: 'bronos.chat', id: S.dm } } }, before])
   assert.ok(reads() > before, 'the open read the conversation, after prepare')
   assert.deepEqual(order.slice(1), [['annotate', `chat:${S.dm}`], ['cancel', `chat:${S.dm}`]])
   await h.stop()
@@ -587,4 +588,101 @@ test('a new client id in the settings signs out; the lanes go', async () => {
   assert.equal(b.ctx.lastState().auth.signedIn, false)
   assert.deepEqual(b.ctx.lastState().lanes, [])
   await b.h.stop()
+})
+
+// ---- inbox-item overlay type, buttons and the early reader overlay ----
+
+const itemInfo = (id, source = 'bronos.chat') => ({ type: { name: 'inbox-item', data: { source, id } }, title: 't', opener: 'bronos.chat' })
+
+test('overlay buttons: only for our own items, labels follow state, run = act', async () => {
+  const { ctx, h } = await signedIn()
+  assert.equal(ctx.buttonProviders.length, 1)
+  assert.equal(ctx.buttonProviders[0].name, 'inbox-item')
+  const provider = ctx.buttonProviders[0].provider
+  assert.deepEqual(await provider(itemInfo(S.dm, 'bronos.jira')), [])
+  assert.deepEqual(await provider(itemInfo('not-a-conversation')), [])
+  assert.deepEqual(await provider({ type: { name: 'inbox-item', data: null }, title: 't', opener: 'x' }), [])
+  const before = await provider(itemInfo(S.dm))
+  assert.deepEqual(before.map((b) => b.id), ['markRead'])
+  assert.match(before[0].label, /read/i)
+  await before[0].run(itemInfo(S.dm))
+  await settle({ h })
+  const after = await provider(itemInfo(S.dm))
+  assert.deepEqual(after.map((b) => b.id), ['markUnread'])
+  assert.notEqual(after[0].label, before[0].label)
+  await h.stop()
+})
+
+test('overlay buttons: a ctx without the member still activates and opens a conversation', async () => {
+  const { ctx, h } = await signedIn({ noButtons: true, reviewer: null })
+  assert.equal(ctx.buttonProviders.length, 0)
+  await ctx.sendPanel({ type: 'open', id: S.dm })
+  assert.equal(ctx.overlays.length, 1)
+  await h.stop()
+})
+
+test('overlay buttons: a failed Mark read shows in the notice and throws, not silent', async () => {
+  const { ctx, h } = await signedIn({ google: { fail: { [`patch:${S.dm}`]: 500 } } })
+  const provider = ctx.buttonProviders[0].provider
+  const [button] = await provider(itemInfo(S.dm))
+  assert.equal(button.id, 'markRead')
+  await assert.rejects(button.run(itemInfo(S.dm)), /^Error: chat: /)
+  assert.equal(ctx.lastState().notice.kind, 'error')
+  assert.equal((await provider(itemInfo(S.dm)))[0].id, 'markRead', 'still unread')
+  await h.stop()
+})
+
+test('own reader page: the overlay (type, ready manual) starts before the conversation is read; Discuss sends its text', async () => {
+  const b = await signedIn({ reviewer: null, overlayAnswer: { kind: 'dismissed' } })
+  const { ctx, h, google } = b
+  const reads = () => google.calls.filter((c) => /messages|media/.test(c.path)).length
+  const before = reads()
+  let readsAtStart = -1
+  const start = ctx.overlay.start
+  ctx.overlay.start = (spec) => ((readsAtStart = reads()), start(spec))
+  await ctx.sendPanel({ type: 'open', id: S.dm })
+  const o = ctx.overlays[0]
+  assert.equal(o.spec.ready, 'manual')
+  assert.deepEqual(o.spec.type, { name: 'inbox-item', data: { source: 'bronos.chat', id: S.dm } })
+  assert.equal(readsAtStart, before, 'the overlay is up before anything is read')
+  assert.equal(o.posts[0].type, 'doc')
+  const d = await o.discuss()
+  assert.match(d.text, /deploy/)
+  assert.ok(d.text.length <= 4100)
+  await h.stop()
+})
+
+test('own reader page: an open that fails closes the early overlay; an alert group gets no type', async () => {
+  const { ctx, h } = await signedIn({ reviewer: null, google: { fail: { [`messages:${S.dm}`]: 500 } } })
+  let closed = false
+  const start = ctx.overlay.start
+  ctx.overlay.start = (spec) => {
+    const hd = start(spec)
+    return { ...hd, close: () => ((closed = true), hd.close()) }
+  }
+  await ctx.sendPanel({ type: 'open', id: S.dm })
+  await settle({ h })
+  assert.equal(closed, true)
+  const alert = ctx.lastState().lanes.flatMap((l) => l.rows).find((r) => r.kind === 'alert')
+  if (alert) {
+    const n = ctx.overlays.length
+    await ctx.sendPanel({ type: 'open', id: alert.id })
+    await settle({ h })
+    assert.equal(ctx.overlays.slice(n).some((o) => o.spec.type), false)
+  }
+  await h.stop()
+})
+
+test('reviewer: the inbox-item type goes with prepare and annotate; an alert group has none', async () => {
+  const order = []
+  const reviewer = fakeReviewer()
+  reviewer.prepare = async (spec) => (order.push(spec), { opened: true })
+  reviewer.cancel = async () => ({ closed: false })
+  const { ctx, h } = await signedIn({ reviewer, sessions: [tab('t1', 'waiting', { active: true })] })
+  await ctx.sendPanel({ type: 'open', id: S.dm })
+  await settle({ h })
+  const type = { name: 'inbox-item', data: { source: 'bronos.chat', id: S.dm } }
+  assert.deepEqual(order[0].type, type)
+  assert.deepEqual(reviewer.calls[0].type, type)
+  await h.stop()
 })

@@ -120,6 +120,14 @@ shows the scope line Inbox sees. Nothing leaves your machine: the data goes to a
 same project. Inbox 0.2.0 reads v2; an older Inbox (v1) no longer gets Chat from this version.
 Providing needs no newer app; Inbox reading it needs cc-cockpit 0.9.7.
 
+**Conversation overlays.** A conversation opens with the overlay type `inbox-item { source: "bronos.chat", id }`
+(the reviewer gets it in `prepare` and `annotate`; our own reader page starts at once with
+`ready: 'manual'`, before the conversation is read, and drops its loader once it is drawn). On an app
+that has `ctx.overlay.buttons`, the overlay of one of this plugin's own conversations gets Mark read /
+Mark unread in its toolbar (the same code as the feed's `act`; a failure shows in the panel's notice),
+and the reader page's Discuss with Claude sends the latest messages (capped). Only a conversation still
+in the feed gets the buttons. An alert group row has no type.
+
 ## Read state: what Mark read and Mark unread change
 
 Google Chat keeps **one read time per space** (and one per followed thread, which only Chat itself
