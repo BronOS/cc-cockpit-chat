@@ -49,7 +49,7 @@ function render() {
   for (const id of assets.keys()) showAsset(id)
   if (!drawn) {
     drawn = true
-    ccPanel.ready()
+    if (typeof ccPanel.ready === 'function') ccPanel.ready()
   }
 }
 

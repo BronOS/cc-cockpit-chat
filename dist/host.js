@@ -842,11 +842,6 @@ function start(ctx, io = {}) {
     postState()
   }
 
-  /**
-   * Without the reviewer's annotate: our own read-only page with Discuss and New session. It gets the
-   * same HTML in parts, then one message per image, so no message passes the page limit. A link click
-   * in the page comes back as `{ open }` and opens only a link this host put into the document.
-   */
   /** Starts the reader page's overlay (before the conversation is read when it can); null when the app refuses. */
   function startReader(id, title) {
     const type = overlayType(id)
@@ -860,6 +855,11 @@ function start(ctx, io = {}) {
     }
   }
 
+  /**
+   * Without the reviewer's annotate: our own read-only page with Discuss and New session. It gets the
+   * same HTML in parts, then one message per image, so no message passes the page limit. A link click
+   * in the page comes back as `{ open }` and opens only a link this host put into the document.
+   */
   async function plainReader(id, t, v, early) {
     const started = early || startReader(id, t.title)
     if (!started) return
@@ -873,6 +873,9 @@ function start(ctx, io = {}) {
       for (const a of v.assets) handle.post({ type: 'asset', id: a.id, dataUrl: a.dataUrl })
     } catch (e) {
       ctx.log.warn(`posting to the reader: ${e.message}`)
+      // ready: 'manual' means the page never draws, so never says ready, and the loader would stay.
+      setNotice(`Cannot show the conversation: ${e.message}`, 'error')
+      try { handle.close?.() } catch {}
     }
     markOnOpen(id)
     // The links the page may ask to open: the ones this host put into the document (http(s) only,
