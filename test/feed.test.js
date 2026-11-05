@@ -7,7 +7,7 @@ const assert = require('node:assert/strict')
 const host = require('../dist/host')
 const feed = require('../dist/lib/feed')
 const { readSettings } = require('../dist/lib/settings')
-const { fakeGoogle, fakeOAuth, fakeCtx, fakeTriage, fakeReviewer, tokens, fixture, NOW, S } = require('./fakes')
+const { fakeGoogle, fakeOAuth, fakeCtx, fakeTriage, fakeReviewer, tokens, fixture, json, NOW, S } = require('./fakes')
 
 const CLIENT_FILE = JSON.stringify(fixture('client_secret.json'))
 const T1 = `${S.team}/threads/T1`
@@ -348,7 +348,7 @@ test('act open: the conversation goes to the reviewer the way a row click does, 
   const svc = svcOf(b)
   for (const [n, id] of [T1, S.random, T3, S.alerts].entries()) {
     assert.deepEqual(await svc.act(id, 'open'), { ok: true }, id)
-    // act answers once the open has started: the read and the annotate go on after it.
+    // A reviewer without prepare: nothing is on screen before the annotate, so act answers after it.
     await until(() => reviewer.calls.length === n + 1)
   }
   assert.deepEqual(b.google.writes, [])
@@ -366,6 +366,36 @@ test('act open settles once the reader is up, not when the person closes it (no 
   assert.deepEqual(await Promise.race([svcOf(b).act(S.dm, 'open'), late]), { ok: true })
   assert.ok(b.ctx.overlays.length > before)
   await b.h.stop()
+})
+
+// Round-2 review: act answered ok before anything was on screen, so a failed read went only to this
+// panel's notice and Inbox ended the item's "back" mark for an open the person never saw.
+test('act open with nothing on screen yet (a reviewer without prepare, or a prepare that failed): a failed read is the act\'s refusal', async () => {
+  const reviewers = {
+    'no prepare': fakeReviewer(),
+    'prepare failed': Object.assign(fakeReviewer(), {
+      prepare: async () => {
+        throw new Error('reviewer: the review overlay did not open: overlay: at most 3 open')
+      },
+      cancel: async () => ({ closed: false }),
+    }),
+  }
+  for (const [name, reviewer] of Object.entries(reviewers)) {
+    let failing = false
+    const routes = (u) => (failing && u.pathname === `/v1/${S.dm}/messages` ? json({ error: { code: 500, message: 'boom' } }, 500) : null)
+    const b = await signedIn({ reviewer, google: { routes } })
+    failing = true
+    const r = await svcOf(b).act(S.dm, 'open')
+    assert.equal(r.ok, false, name)
+    assert.match(r.message, /^chat: Google Chat had a problem \(500\)/, name)
+    assert.equal(reviewer.calls.length, 0, `${name}: nothing was annotated`)
+    assert.equal(b.ctx.overlays.length, 0, `${name}: no reader page either`)
+    // The same reviewer opens a conversation that can be read: ok once the reviewer's overlay is filled.
+    failing = false
+    assert.deepEqual(await svcOf(b).act(S.dm, 'open'), { ok: true }, name)
+    assert.equal(reviewer.calls.length, 1, name)
+    await b.h.stop()
+  }
 })
 
 test('sync: after activate\'s first cached view (signed out here), carrying the state', async () => {
