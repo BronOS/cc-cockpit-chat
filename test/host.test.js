@@ -9,7 +9,7 @@ const { rowView } = require('../panels/rowlogic')
 const host = require('../dist/host')
 const { refreshKey } = require('../dist/lib/auth')
 const T = require('../dist/lib/time')
-const { fakeGoogle, fakeOAuth, fakeCtx, fakeTriage, fakeReviewer, tokens, fixture, ago, NOW, U, S, CLIENT_ID, CLIENT_SECRET } = require('./fakes')
+const { fakeGoogle, fakeOAuth, fakeCtx, fakeTriage, fakeReviewer, tokens, fixture, json, ago, NOW, U, S, CLIENT_ID, CLIENT_SECRET } = require('./fakes')
 
 const CLIENT_FILE = JSON.stringify(fixture('client_secret.json'))
 
@@ -351,6 +351,81 @@ test('open with prepare: an open that fails cancels the loading overlay', async 
   await settle({ h })
   assert.deepEqual(calls, [['prepare', `chat:${S.dm}`], ['cancel', `chat:${S.dm}`]])
   await h.stop()
+})
+
+/**
+ * A reviewer with prepare, cancel, fail and features (cc-cockpit 0.13.2): records the calls in order and
+ * fills like the fake one. `features` without 'fail' plays an older app.
+ */
+function failingReviewer(features = ['prepare', 'fail']) {
+  const r = fakeReviewer()
+  r.order = []
+  const annotate = r.annotate
+  r.prepare = async (spec) => (r.order.push(['prepare', spec.key]), { opened: true })
+  r.cancel = async (spec) => (r.order.push(['cancel', spec.key]), { closed: true })
+  r.fail = async (spec) => (r.order.push(['fail', spec]), { failed: true })
+  r.features = async () => features
+  r.annotate = async (a) => (r.order.push(['annotate', a.key]), annotate(a))
+  return r
+}
+
+// A network outage made the overlay flash open and shut with no reason: the loader was cancelled
+// and the error went only to this panel's notice.
+test('open with prepare: a read that fails turns the loader into the error page with Try again, not a cancel', async () => {
+  const reviewer = failingReviewer()
+  let down = false
+  const routes = (u) => {
+    if (down && u.pathname === `/v1/${S.dm}/messages`) throw new TypeError('fetch failed')
+    return null
+  }
+  const { ctx, h, google } = await signedIn({ reviewer, google: { routes }, sessions: [tab('t1', 'waiting', { active: true })], project: { markReadOnOpen: true } })
+  down = true
+  await ctx.sendPanel({ type: 'open', id: S.dm })
+  await settle({ h })
+  const key = `chat:${S.dm}`
+  assert.deepEqual(reviewer.order, [['prepare', key], ['fail', { key, message: "Can't reach Google Chat: cannot reach chat.googleapis.com: fetch failed", retry: true }]])
+  assert.equal(reviewer.calls.length, 0, 'nothing annotated')
+  assert.deepEqual(google.writes, [], 'never shown, so never marked read')
+  // The panel notice and the log, as before.
+  assert.equal(h.S.notice.kind, 'error')
+  assert.match(h.S.notice.text, /cannot reach chat\.googleapis\.com/)
+  // Try again: the reviewer's action event, for our key and our caller only.
+  const fire = (d) => ctx.handles.reviewer.listeners.action.forEach((fn) => fn(d))
+  fire({ key, id: 'retry', caller: 'someone.else' })
+  fire({ key: 'chat:other', id: 'retry', caller: 'bronos.chat' })
+  await settle({ h })
+  assert.equal(reviewer.order.length, 2, 'not ours: ignored')
+  down = false
+  fire({ key, id: 'retry', caller: 'bronos.chat' })
+  await until(() => reviewer.calls.length === 1)
+  await settle({ h })
+  // The normal open again: prepare takes the error page back to the loader, the annotate fills it.
+  assert.deepEqual(reviewer.order.slice(2), [['prepare', key], ['annotate', key], ['cancel', key]])
+  await until(() => google.writes.length === 1)
+  assert.deepEqual(google.writes.map((w) => w.space), [S.dm], 'shown now: markReadOnOpen')
+  // A second Try again for the same page means nothing now.
+  fire({ key, id: 'retry', caller: 'bronos.chat' })
+  await settle({ h })
+  assert.equal(reviewer.order.length, 5)
+  await h.stop()
+})
+
+test('open with prepare: a reviewer without fail (an older app), or one refusing it, cancels the loader on a failed read, as before', async () => {
+  const older = failingReviewer(['prepare'])
+  const refusing = failingReviewer()
+  refusing.fail = async (spec) => (refusing.order.push(['fail', spec.key]), { failed: false })
+  const key = `chat:${S.dm}`
+  for (const [reviewer, order] of [
+    [older, [['prepare', key], ['cancel', key]]],
+    [refusing, [['prepare', key], ['fail', key], ['cancel', key]]],
+  ]) {
+    const routes = (u) => (u.pathname === `/v1/${S.dm}/messages` ? json({ error: { code: 500, message: 'boom' } }, 500) : null)
+    const { ctx, h } = await signedIn({ reviewer, google: { routes } })
+    await ctx.sendPanel({ type: 'open', id: S.dm })
+    await settle({ h })
+    assert.deepEqual(reviewer.order, order)
+    await h.stop()
+  }
 })
 
 test('markReadOnOpen off: opening marks nothing', async () => {

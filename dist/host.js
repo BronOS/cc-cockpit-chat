@@ -691,8 +691,9 @@ function start(ctx, io = {}) {
    * No `url` goes to annotate: there is no "open in Chat" (design, answer 2).
    * The reviewer's overlay is up before the conversation is read (its prepare, where it has one):
    * reading the messages, the names and the pictures takes seconds, with nothing on screen meanwhile
-   * (real-work feedback 8). The annotate below fills that overlay; whatever else happens (a failed
-   * read, our own reader page) closes it in the finally.
+   * (real-work feedback 8). The annotate below fills that overlay; a failed read turns it into the
+   * error page with Try again where the reviewer has `fail` (failView); whatever else happens (an
+   * older reviewer's failed read, our own reader page) closes it in the finally.
    * `onStarted` (feed act) runs only once something is on screen: the prepared overlay, our reader
    * page, or (neither: a reviewer without prepare, a prepare that failed or ran past its wait) the
    * filled view at the end. Called earlier, a failed read reached only this panel's notice while
@@ -712,10 +713,61 @@ function start(ctx, io = {}) {
     try {
       await showConversation(id, pre, early, shown)
     } finally {
-      if (pre) await cancelView(pre)
+      // A loader turned into the read's error page (failView) stays: it is the person's to close.
+      if (pre && !pre.failed) await cancelView(pre)
       if (early && !early.used) closeQuietly(early.handle)
     }
   }
+
+  // Conversations whose reviewer loader shows a failed read with Try again (failView): key -> row id.
+  const failedViews = new Map()
+
+  /**
+   * A read that failed after the reviewer's loader was up: the loader shows the error with Try again
+   * (the reviewer's `fail`, cc-cockpit 0.13.2) instead of closing. Cancelling it, as before, made a
+   * network outage flash the overlay open and shut with no reason on screen: the error reached only
+   * this panel's notice, which a click in Inbox never shows. The act contract stays: the loader was on
+   * screen, so the feed's act answered ok at prepare; nothing is marked read (seen() never ran).
+   * True when the reviewer took it; false (an older reviewer without 'fail', the person closed the
+   * loader meanwhile) leaves the cancel to openConversation's finally, as before.
+   */
+  async function failView(pre, id, e) {
+    const msg = oneLine(e && e.message ? e.message : String(e))
+    const head = (e && (e.kind === 'network' || e.kind === 'timeout')) || /^cannot reach /i.test(msg) ? "Can't reach Google Chat" : 'Could not load this conversation'
+    try {
+      const features = await within(reviewer.features(), REVIEWER_WAIT_MS)
+      if (!Array.isArray(features) || !features.includes('fail')) return false
+      // Try again only when its click can reach us (the event `action`).
+      const retry = typeof reviewer.on === 'function'
+      const r = await within(reviewer.fail({ key: pre.key, message: cut(`${head}: ${msg}`, 300), retry }), REVIEWER_WAIT_MS)
+      if (!(r && r.failed)) return false
+      if (retry) failedViews.set(pre.key, id)
+      return true
+    } catch (err) {
+      ctx.log.warn(`reviewer.fail: ${err && err.message ? err.message : err}`)
+      return false
+    }
+  }
+
+  /**
+   * Try again on an error page of ours (the reviewer's event `action` { key, id: 'retry', caller }):
+   * the normal open again, so the reviewer takes the page back to its loader (prepare), and the
+   * conversation or the error once more fills it. Events reach every consumer: only our own key counts.
+   */
+  async function onReviewerAction(d) {
+    if (!d || d.caller !== ctx.pluginId || d.id !== 'retry' || typeof d.key !== 'string') return
+    const id = failedViews.get(d.key)
+    if (id === undefined) return
+    failedViews.delete(d.key)
+    try {
+      await openConversation(id)
+    } catch (e) {
+      // As a panel click's open: the log and the notice, beside the error page the retry put up again.
+      ctx.log.warn(`retry open: ${e && e.message ? e.message : e}`)
+      setNotice(e && e.message ? e.message : String(e), 'error')
+    }
+  }
+  if (typeof reviewer.on === 'function') reviewer.on('action', (d) => void onReviewerAction(d).catch((e) => ctx.log.warn(`reviewer action: ${e && e.message ? e.message : e}`)))
 
   /**
    * The `inbox-item` type of a conversation overlay (Inbox's and the buttons' key), or none for an
@@ -855,7 +907,15 @@ function start(ctx, io = {}) {
   }
 
   async function showConversation(id, pre, early, shown = () => {}) {
-    const t = await loadConversation(id)
+    let t
+    try {
+      t = await loadConversation(id)
+    } catch (e) {
+      // The loader shows the failure (and openConversation leaves it); the error still goes on to
+      // the panel's notice and the log, as before.
+      if (pre) pre.failed = await failView(pre, id, e)
+      throw e
+    }
     // Marked read only once the conversation is on screen: annotate also resolves, with
     // { opened: false }, when the person closed the loader during the read, and nothing is shown then
     // (phase-1 review round 4).

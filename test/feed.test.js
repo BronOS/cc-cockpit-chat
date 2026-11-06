@@ -474,6 +474,31 @@ test('act open: the loader the person closed (annotate { opened: false }) marks 
   await b.h.stop()
 })
 
+// A failed read used to cancel the reviewer's loader (the overlay flashed open and shut). With the
+// reviewer's fail it stays as the error page; the act contract is unchanged: the loader was on screen,
+// so act answered ok at prepare. Nothing is marked read: the conversation was never shown.
+test('act open: a read that fails after prepare leaves the error page (fail, Try again), answers ok, marks nothing read', async () => {
+  const reviewer = fakeReviewer()
+  const order = []
+  reviewer.prepare = async (spec) => (order.push(['prepare', spec.key]), { opened: true })
+  reviewer.cancel = async (spec) => (order.push(['cancel', spec.key]), { closed: true })
+  reviewer.fail = async (spec) => (order.push(['fail', spec.key, spec.retry]), { failed: true })
+  reviewer.features = async () => ['prepare', 'fail']
+  let failing = false
+  const routes = (u) => (failing && u.pathname === `/v1/${S.dm}/messages` ? json({ error: { code: 500, message: 'boom' } }, 500) : null)
+  const b = await signedIn({ reviewer, google: { routes }, project: { markReadOnOpen: true } })
+  failing = true
+  assert.deepEqual(await svcOf(b).act(S.dm, 'open'), { ok: true })
+  await until(() => order.length === 2)
+  await settle(b)
+  assert.deepEqual(order, [['prepare', `chat:${S.dm}`], ['fail', `chat:${S.dm}`, true]])
+  assert.equal(reviewer.calls.length, 0)
+  assert.deepEqual(b.google.writes, [], 'never shown, so not marked read')
+  assert.equal((await svcOf(b).snapshot()).items.find((i) => i.id === S.dm).read, false)
+  assert.match(b.h.S.notice.text, /^Could not open the conversation: Google Chat had a problem \(500\)/, 'the panel says it too, as before')
+  await b.h.stop()
+})
+
 test('markReadOnOpen: our reader page closed before the conversation reached it marks nothing read', async () => {
   const b = await signedIn({ project: { markReadOnOpen: true } })
   // The fake page ends at once (dismissed): the person closed the loader during the read.

@@ -210,6 +210,11 @@ space: its newest 50) and shows each message oldest first as a card: sender, tim
 mark, the message it quotes, its text, a bot's cards, its pictures and files, its reactions. The
 details column has the space, kind, threading, members, the people and the unread count.
 
+When reading the conversation fails (no network, a Google error), the reviewer's overlay stays open
+with the error and a **Try again** button, which reads it again in the same overlay (0.3.3; it needs
+cc-cockpit 0.13.2 or later; an older app closes the overlay as before and the error shows in the
+panel). A conversation that was never shown is not marked read.
+
 The page is built by the plugin itself, never shown as Chat sent it: Chat's text marks (`*bold*`,
 `_italic_`, `~strike~`, code, links, @mentions) become plain tags, every text is escaped, links keep
 only http(s) addresses, and a bot card's HTML goes through the same sanitizer as the Gmail plugin's.
