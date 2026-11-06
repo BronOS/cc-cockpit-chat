@@ -49,19 +49,25 @@
       li.row:hover { background: var(--cc-surface-1); }
       li.row:focus { outline: none; }
       li.row:focus-visible { outline: 2px solid var(--cc-focus); outline-offset: -2px; }
-      .line { display: flex; gap: 6px; align-items: center; }
-      .from { flex: 0 1 auto; max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--cc-fg-muted); }
-      .subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .age { flex: none; color: var(--cc-fg-subtle); font-size: 11px; }
-      .n { flex: none; font-size: 10px; color: var(--cc-fg-muted); }
-      /* Unread (newer than the space's read time in Chat): an accent bar on the left, title in full strength. */
+      /* The first line: the place bold and the sender muted (the mockup "Chat rows"), the time at its
+         right end. Baseline, so the 11px time and the pills sit on the text's line. */
+      .line { display: flex; gap: 6px; align-items: baseline; }
+      .line .dot { align-self: center; }
+      .subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+      .subject .sep { font-weight: 400; color: var(--cc-fg-subtle); }
+      .subject .from { font-weight: 500; color: var(--cc-fg-muted); }
+      .dm { display: inline-block; margin-right: 4px; padding: 0 4px; border: 1px solid var(--cc-border); border-radius: 4px; font-size: 9px; font-weight: 700; line-height: 13px; color: var(--cc-fg-subtle); vertical-align: 1px; }
+      /* The time column: short, tabular digits so the times line up, accent while unread. */
+      .age { flex: none; color: var(--cc-fg-subtle); font-size: 11px; font-variant-numeric: tabular-nums; }
+      .unread .age { color: var(--cc-accent); }
+      /* Unread (newer than the space's read time in Chat): an accent bar on the left. */
       li.row.unread { box-shadow: inset 2px 0 0 var(--cc-accent); }
-      .unread .subject { font-weight: 600; }
-      .unread .from { color: var(--cc-fg); font-weight: 600; }
       /* A mark on its way to Chat: the row shows what it will be, a little faded. */
       li.row.pending { opacity: 0.6; }
-      .pill.me { background: var(--cc-accent); color: var(--cc-accent-fg); }
-      .sub { padding-left: 14px; color: var(--cc-fg-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      /* The message: normal weight, up to two lines; then the small meta. */
+      .msg { padding-left: 14px; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; color: var(--cc-fg); }
+      .meta { padding-left: 14px; font-size: 11px; color: var(--cc-fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .meta .mark { color: var(--cc-accent); }
       .pill { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--cc-surface-3); color: var(--cc-fg); flex: none; }
       .pill.firing { background: var(--cc-status-ended); color: var(--cc-accent-fg); }
       /* The triage dot: the priority's colour, hollow below 0.5 confidence (as in the Jev triage panel). */

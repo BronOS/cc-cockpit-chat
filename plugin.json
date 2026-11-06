@@ -1,7 +1,7 @@
 {
   "id": "bronos.chat",
   "name": "Google Chat",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "api": 1,
   "main": "dist/host.js",
   "description": "Your Google Chat in lanes (Mentions, Direct messages, Spaces, Alerts, Recent), sorted by Jev triage, a conversation opened as a clean page to discuss with Claude, Mark read / Mark unread. It changes nothing in Google Chat but your read state.",

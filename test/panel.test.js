@@ -5,7 +5,9 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { rowKeyAction, rowClickOpens, rowButtons, moveIndex, ageText, alertBadge } = require('../panels/rowlogic')
+// Local time is Berlin so the time column's boundaries are checkable.
+process.env.TZ = 'Europe/Berlin'
+const { rowKeyAction, rowClickOpens, rowButtons, moveIndex, whenText, fullTimeText, rowView, alertBadge } = require('../panels/rowlogic')
 
 const ROOT = path.join(__dirname, '..')
 const NOW = Date.parse('2026-11-03T08:00:00Z')
@@ -47,15 +49,51 @@ test('row buttons: triage, Mark read on an unread row, Mark unread on a read one
   for (const set of [unread, read, noTarget, alert]) assert.ok(!set.some((b) => b.action === 'browser' || /Open in|↗/.test(b.label + b.title)))
 })
 
-test('ages and the alert pill', () => {
-  assert.equal(ageText(NOW - 10000, NOW), 'now')
-  assert.equal(ageText(NOW - 5 * 60000, NOW), '5m')
-  assert.equal(ageText(NOW - 3 * 3600000, NOW), '3h')
-  assert.equal(ageText(NOW - 2 * 86400000, NOW), '2d')
-  assert.equal(ageText(Date.parse('2026-10-03T08:00:00Z'), NOW), 'Oct 3')
-  assert.equal(ageText(0, NOW), '')
+test('the time column: now, minutes, hours the same day, Yesterday, the weekday, the date, another year', () => {
+  // T is Tue 3 Nov 2026, 13:42 in Berlin: every boundary in local time.
+  const T = Date.parse('2026-11-03T13:42:00+01:00')
+  const W = (s, now = T) => whenText(Date.parse(s), now)
+  assert.equal(whenText(T - 10000, T), 'now')
+  assert.equal(whenText(T - 60000, T), '1m')
+  assert.equal(whenText(T - 39 * 60000, T), '39m')
+  assert.equal(whenText(T - 3 * 3600000, T), '3h')
+  assert.equal(W('2026-11-03T00:00:00+01:00'), '13h', 'local midnight is still today')
+  assert.equal(W('2026-11-02T23:59:00+01:00'), 'Yesterday')
+  assert.equal(W('2026-11-01T12:00:00+01:00'), 'Sun')
+  assert.equal(W('2026-10-28T00:00:00+01:00'), 'Wed', '6 days back: a weekday')
+  assert.equal(W('2026-10-27T23:59:00+01:00'), '27 Oct', '7 days back: the date')
+  assert.equal(W('2026-10-25T01:00:00+02:00'), '25 Oct', 'over the DST change, in calendar days')
+  assert.equal(W('2026-10-29T12:00:00+01:00', Date.parse('2026-10-30T00:30:00+01:00')), 'Yesterday', 'at 00:30 a message of noon is Yesterday, not 12h')
+  assert.equal(W('2026-10-29T23:50:00+01:00', Date.parse('2026-10-30T00:30:00+01:00')), '40m')
+  assert.equal(W('2026-01-01T00:00:00+01:00'), '1 Jan')
+  assert.equal(W('2025-12-31T23:59:00+01:00'), '31 Dec 2025')
+  assert.equal(whenText(T + 5 * 60000, T), 'now', 'a clock a little ahead')
+  assert.equal(W('2026-11-05T10:00:00+01:00'), '5 Nov')
+  for (const bad of [0, null, undefined, NaN, '1']) assert.equal(whenText(bad, T), '')
+  assert.equal(fullTimeText(Date.parse('2026-11-06T09:21:00+01:00')), 'Fri 6 Nov 2026, 09:21')
+  assert.equal(fullTimeText(0), '')
   assert.equal(alertBadge({ kind: 'alert', firing: 2, count: 3 }), '2 firing')
   assert.equal(alertBadge({ kind: 'conv' }), '')
+})
+
+test('row view: space · sender, then the message; a DM is the person; a thread with a reply is Space › thread; the meta repeats neither', () => {
+  // A flat space: the title is the space; the old sub line ("Max Example: Thank you") is not drawn.
+  const sp = rowView({ kind: 'conv', conv: 'space', title: 'Acme Team', where: 'Acme Team', from: 'Max Example', preview: 'Thank you', sub: 'Max Example: Thank you', count: 1 })
+  assert.deepEqual(sp, { head: { dm: false, place: 'Acme Team', thread: '', from: 'Max Example' }, message: 'Thank you', meta: [] })
+  // A DM: the person (the title), never "Direct message" (where) nor "you" (the latest sender).
+  const dm = rowView({ kind: 'conv', conv: 'dm', title: 'Bob Example', where: 'Direct message', from: 'you', preview: 'ok, merged', count: 2 })
+  assert.deepEqual(dm, { head: { dm: true, place: 'Bob Example', thread: '', from: '' }, message: 'ok, merged', meta: ['2 new'] })
+  // A thread whose latest is a reply: its start names it; a mention is in the meta.
+  const th = rowView({ kind: 'conv', conv: 'thread', title: 'Failover alerts before the call?', where: 'Alerts', from: 'Ann Example', preview: 'the second spike is at 08:12', mentioned: 'me', count: 1 })
+  assert.deepEqual(th, { head: { dm: false, place: 'Alerts', thread: 'Failover alerts before the call?', from: 'Ann Example' }, message: 'the second spike is at 08:12', meta: ['mentions you'] })
+  // A thread whose start is the message shown (cut with an ellipsis in the title): just the space.
+  assert.equal(rowView({ kind: 'conv', conv: 'thread', title: 'Lunch at…', where: 'Acme Team', from: 'Ann Example', preview: 'Lunch at noon today?' }).head.thread, '')
+  // A group chat of one other person: the sender is the place, said once. @all in the meta.
+  const g = rowView({ kind: 'conv', conv: 'group', title: 'Ann Example', where: 'Ann Example', from: 'Ann Example', preview: 'hi', mentioned: 'all' })
+  assert.deepEqual([g.head.from, g.meta], ['', ['mentions @all']])
+  // An alert row: the alert leads, its spaces are the second line, no new count (the firing pill says it).
+  const al = rowView({ kind: 'alert', title: 'HighCPU: node-1', from: 'Grafana (bot)', sub: 'Acme Alerts', count: 3 })
+  assert.deepEqual(al, { head: { dm: false, place: 'HighCPU: node-1', thread: '', from: 'Grafana (bot)' }, message: 'Acme Alerts', meta: [] })
 })
 
 test('the pages: no inline script, untrusted text never as markup, no link to Chat', () => {

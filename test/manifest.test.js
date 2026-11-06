@@ -26,7 +26,7 @@ const noComments = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/
 
 test('the manifest: id, api, entry points and files exist, the services it uses', () => {
   assert.equal(manifest.id, 'bronos.chat')
-  assert.equal(manifest.version, '0.3.1')
+  assert.equal(manifest.version, '0.3.2')
   assert.equal(manifest.api, 1)
   assert.equal(manifest.license, 'MIT')
   assert.ok(fs.existsSync(path.join(ROOT, manifest.main)))

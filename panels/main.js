@@ -197,12 +197,24 @@ function wrongBox(r) {
   return w
 }
 
+/** The first line's text: the place (with the DM tag, the thread), the sender. */
+function headEl(h) {
+  const t = el('span', { class: 'subject' })
+  if (h.dm) t.append(el('span', { class: 'dm', text: 'DM', title: 'A direct message' }))
+  t.append(document.createTextNode(h.place))
+  if (h.thread) t.append(el('span', { class: 'sep', text: ' › ' }), document.createTextNode(h.thread))
+  if (h.from) t.append(el('span', { class: 'sep', text: ' · ' }), el('span', { class: 'from', text: h.from }))
+  return t
+}
+
 function renderRow(r) {
+  const v = rowView(r)
+  const headText = [v.head.place, v.head.thread, v.head.from].filter(Boolean).join(' · ')
   const li = el('li', {
     class: `row${r.unread ? ' unread' : ''}${r.pending ? ' pending' : ''}`,
     tabindex: '0',
-    'aria-label': `${r.title}: ${r.sub}${r.unread ? ' (unread)' : ''}. Enter opens it.`,
-    title: `${r.title}\n${r.sub}\nClick to open${state.annotate ? ' (notes, Discuss, New session)' : ''}${r.unread && r.canRead && state.markReadOnOpen ? '; opening marks it read' : ''}${r.noTarget ? '\nChat cannot mark this one from here (a reply in a thread you do not follow)' : ''}`,
+    'aria-label': `${v.head.dm ? 'Direct message, ' : ''}${headText}: ${v.message}${r.unread ? ' (unread)' : ''}. Enter opens it.`,
+    title: `${headText}\n${v.message}\nClick to open${state.annotate ? ' (notes, Discuss, New session)' : ''}${r.unread && r.canRead && state.markReadOnOpen ? '; opening marks it read' : ''}${r.noTarget ? '\nChat cannot mark this one from here (a reply in a thread you do not follow)' : ''}`,
   })
   li.dataset.id = r.id
   li.addEventListener('click', (ev) => {
@@ -211,15 +223,19 @@ function renderRow(r) {
     if (rowClickOpens(inControl, Boolean(sel && !sel.isCollapsed && li.contains(sel.anchorNode)))) post('open', { id: r.id })
   })
   li.addEventListener('keydown', (ev) => onRowKey(ev, r, li))
+  // First line: the triage dot, space · sender (bold, muted), the firing pill, the time at the right end.
   const line = el('div', { class: 'line' })
-  line.append(dot(r.verdict), el('span', { class: 'subject', text: r.title }))
-  if (r.mentioned === 'me') line.append(el('span', { class: 'pill me', text: '@you', title: 'You are @mentioned by name' }))
-  else if (r.mentioned === 'all') line.append(el('span', { class: 'pill', text: '@all', title: 'An @all mention' }))
+  line.append(dot(r.verdict), headEl(v.head))
   if (r.kind === 'alert') line.append(el('span', { class: 'pill firing', text: alertBadge(r), title: `${r.count} unread alert message${r.count === 1 ? '' : 's'}` }))
-  else if (r.count > 1) line.append(el('span', { class: 'n', text: String(r.count), title: `${r.count} new messages` }))
-  line.append(el('span', { class: 'age', text: ageText(r.at, Date.now()), title: new Date(r.at).toLocaleString() }))
+  line.append(el('span', { class: 'age', text: whenText(r.at, Date.now()), title: fullTimeText(r.at) }))
   li.append(line)
-  li.append(el('div', { class: 'sub', text: r.sub || ' ' }))
+  // Then the message (two lines at most), then the small meta (mentions, new count).
+  li.append(el('div', { class: 'msg', text: v.message || ' ' }))
+  if (v.meta.length) {
+    const meta = el('div', { class: 'meta' })
+    v.meta.forEach((m, i) => meta.append(el('span', { class: m.startsWith('mentions') ? 'mark' : '', text: i ? ` · ${m}` : m })))
+    li.append(meta)
+  }
   li.append(rowActions(r))
   if (wrongOpen === r.id) li.append(wrongBox(r))
   return li

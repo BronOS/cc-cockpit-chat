@@ -84,17 +84,90 @@ function moveIndex(action, at, count) {
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
-/** A row's age, short: "now", "5m", "3h", "2d", then "Oct 3" (a lane holds at most a few weeks). */
-function ageText(ms, now) {
-  if (!ms) return ''
-  const s = Math.max(0, Math.round((now - ms) / 1000))
-  if (s < 60) return 'now'
-  if (s < 3600) return `${Math.floor(s / 60)}m`
-  if (s < 86400) return `${Math.floor(s / 3600)}h`
-  if (s < 7 * 86400) return `${Math.floor(s / 86400)}d`
+/** `14:05` local. */
+function clockText(ms) {
   const d = new Date(ms)
-  return `${MONTHS[d.getMonth()]} ${d.getDate()}`
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/** Local calendar days from `at` to `now` (0 the same day, 1 yesterday). Midnights, rounded: a DST day has 23 or 25 hours. */
+function dayDiff(at, now) {
+  const mid = (ms) => {
+    const d = new Date(ms)
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  }
+  return Math.round((mid(now) - mid(at)) / 86400000)
+}
+
+/**
+ * A row's time column, short, in local time (as bronos.inbox's rows): "now", "5m", "39m", "3h" (the
+ * same day), "Yesterday", the weekday for the last week ("Mon": a name that cannot repeat within 7
+ * days), "3 Nov" this year, "3 Nov 2025" another. Hours only within the same calendar day: at 00:30
+ * a message of 22:00 is "Yesterday", which is how a person files it, not "2h". A time ahead of `now`
+ * (a clock off by a little) is "now" on the same day, else its date. "" without a time.
+ */
+function whenText(at, now) {
+  if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0) return ''
+  const days = dayDiff(at, now)
+  const d = new Date(at)
+  const date = () => `${d.getDate()} ${MONTHS[d.getMonth()]}${d.getFullYear() === new Date(now).getFullYear() ? '' : ` ${d.getFullYear()}`}`
+  if (at > now) return days === 0 ? 'now' : date()
+  const m = Math.floor((now - at) / 60000)
+  if (m < 1) return 'now'
+  if (m < 60) return `${m}m`
+  if (days === 0) return `${Math.floor(m / 60)}h`
+  if (days === 1) return 'Yesterday'
+  if (days < 7) return WEEKDAYS[d.getDay()]
+  return date()
+}
+
+/** The time column's hover: "Fri 6 Nov 2026, 09:21", local. "" without a time. */
+function fullTimeText(at) {
+  if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0) return ''
+  const d = new Date(at)
+  return `${WEEKDAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${clockText(at)}`
+}
+
+const str = (v) => (typeof v === 'string' ? v : '')
+
+/**
+ * What a row draws besides its buttons (the mockup "Chat rows", as bronos.inbox draws a chat item):
+ * - `head`, the first line: `{ dm, place, thread, from }`, the place (the space) bold, the sender
+ *   muted. A DM (the conversation kind `dm`) is only the person, with a DM tag: its title is the
+ *   other person, and the latest sender would be "you" when the person wrote last. A thread
+ *   (`thread`: the host's `where` is its space, the title its start's first line) is "Space ›
+ *   thread", unless the start is the message shown (the title would only repeat the second line).
+ *   A group chat's title is its name or its people; a flat space's is the space. An alert row: its
+ *   alert ("CPU high: node-1") leads.
+ * - `message`, the second line (2 lines at most, by CSS): the latest message, else the host's `sub`
+ *   (an alert row: its spaces).
+ * - `meta`, small under it: "mentions you" / "mentions @all", "3 new" (more than one new message).
+ *   The place and the sender are not repeated here (the old `sub` line said both).
+ *
+ * @param {{ kind: string, conv?: string, title?: string, where?: string, preview?: string, sub?: string, from?: string, mentioned?: string|null, count?: number }} r
+ */
+function rowView(r) {
+  const title = str(r.title)
+  const from = str(r.from)
+  const message = str(r.preview) || str(r.sub)
+  const meta = []
+  if (r.mentioned === 'me') meta.push('mentions you')
+  else if (r.mentioned === 'all') meta.push('mentions @all')
+  if (r.kind !== 'alert' && r.count > 1) meta.push(`${r.count} new`)
+  let head
+  if (r.kind === 'alert') head = { dm: false, place: title, thread: '', from }
+  else if (r.conv === 'dm') head = { dm: true, place: title, thread: '', from: '' }
+  else if (r.conv === 'thread') {
+    const place = str(r.where)
+    const t = title.replace(/…$/, '').trim()
+    const thread = t && place && title !== place && !message.startsWith(t) ? title : ''
+    head = { dm: false, place: place || title, thread, from }
+  } else head = { dm: false, place: title || str(r.where), thread: '', from }
+  // A sender that is the place itself (a group chat of one other person) is not said twice.
+  if (head.from && head.from === head.place) head.from = ''
+  return { head, message, meta }
 }
 
 /** The small pill of an alert row: "3 firing". */
@@ -103,4 +176,4 @@ function alertBadge(r) {
   return `${r.firing || r.count} firing`
 }
 
-if (typeof module !== 'undefined' && module.exports) module.exports = { rowKeyAction, rowClickOpens, rowButtons, moveIndex, ageText, alertBadge }
+if (typeof module !== 'undefined' && module.exports) module.exports = { rowKeyAction, rowClickOpens, rowButtons, moveIndex, whenText, fullTimeText, clockText, rowView, alertBadge }

@@ -1094,6 +1094,12 @@ function start(ctx, io = {}) {
       lane: r.lane,
       title: cut(r.title, 300),
       sub: cut(r.sub || '', 400),
+      // The row's layout (panels/rowlogic.js rowView): the conversation kind (dm, group, thread,
+      // space), its space and the latest message, so the first line reads space · sender and the
+      // second the message. The old `sub` stays for an alert row (its spaces) and the CLI.
+      ...(r.conv && typeof r.conv.kind === 'string' ? { conv: r.conv.kind } : {}),
+      where: cut(r.where || '', 200),
+      preview: cut(r.preview || '', 300),
       from: cut(r.from || '', 120),
       at: r.at,
       unread: r.unread,

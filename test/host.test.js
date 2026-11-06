@@ -5,6 +5,7 @@
 // log line or the CLI output.
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const { rowView } = require('../panels/rowlogic')
 const host = require('../dist/host')
 const { refreshKey } = require('../dist/lib/auth')
 const T = require('../dist/lib/time')
@@ -141,6 +142,16 @@ test('sign in: our scopes, offline access, the refresh token per project and cli
   assert.equal(st.account, 'me@example.com')
   assert.deepEqual(st.lanes.map((l) => l.id), ['mentions', 'direct', 'spaces', 'alerts', 'recent'])
   assert.equal(lane(st, 'mentions').rows[0].id, T1)
+  // The rows carry what the panel lays out as space · sender, then the message (rowlogic.js rowView).
+  const heads = st.lanes.flatMap((l) => l.rows.map((r) => { const v = rowView(r); return [l.id, v.head.dm, v.head.place, v.head.thread, v.head.from, v.message] }))
+  assert.deepEqual(heads, [
+    ['mentions', false, 'Acme Team', 'Release plan for Friday @you please check', 'Cat Example', 'I can help with the release'],
+    ['direct', true, 'Ann Example', '', '', 'Can you look at the *deploy* of example.com? https://status.example.com/run/42'],
+    ['spaces', false, 'Acme Team', '', 'Cat Example', 'Lunch at noon?'],
+    ['alerts', false, 'HighCPU: node-1, node-2', '', 'Grafana (bot)', 'Acme Alerts'],
+    ['recent', false, 'Acme Team', 'Migration notes', 'Ann Example', 'Done with the migration'],
+    ['recent', false, 'Acme Random', '', 'Ann Example', 'Cake in the kitchen'],
+  ])
   assert.equal(st.unread, 2)
   assert.equal(ctx.badges.at(-1), 2)
   assert.match(st.notice.text, /Signed in as me@example.com/)

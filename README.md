@@ -9,6 +9,9 @@ message. There is no "open in Chat" link anywhere.
 - **Lanes**: Mentions (unread, @you by name, outside DMs), Direct messages (unread DMs and group
   chats), Spaces (the rest that is unread, @all included), Alerts (only when you list alert bots:
   Grafana alerts grouped by alert name) and Recent (read conversations of the last days).
+- **Rows**: the space in bold and the sender (a DM: the person, tagged DM; a thread with replies:
+  "Space › thread"), the time at the right end ("39m", "Yesterday", "Mon", "3 Nov"; the full date on
+  hover), the latest message on up to two lines, then "mentions you" or the new-message count.
 - **Triage**: each lane is sorted by priority (urgent, action, fyi, noise), then the newest message.
   An unread conversation that @mentions you by name is at least action; alert groups are noise; the
   rest is judged by Jev through jev-triage.
